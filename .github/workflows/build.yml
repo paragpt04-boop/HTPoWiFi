@@ -8,6 +8,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
 
@@ -22,15 +23,25 @@ jobs:
         with:
           flutter-version: '3.24.0'
           channel: 'stable'
-
-      - name: Generate Gradle wrapper
-        run: |
-          cd android
-          gradle wrapper --gradle-version=8.3
-          chmod +x gradlew
+          cache: true
 
       - name: Install dependencies
         run: flutter pub get
+
+      - name: Restore missing Gradle wrapper
+        run: |
+          tmpdir="$(mktemp -d)"
+          cd "$tmpdir"
+          touch build.gradle
+          gradle wrapper --gradle-version=8.3 --distribution-type=all
+          cp gradlew "$GITHUB_WORKSPACE/android/gradlew"
+          cp gradlew.bat "$GITHUB_WORKSPACE/android/gradlew.bat"
+          mkdir -p "$GITHUB_WORKSPACE/android/gradle/wrapper"
+          cp gradle/wrapper/gradle-wrapper.jar "$GITHUB_WORKSPACE/android/gradle/wrapper/gradle-wrapper.jar"
+          chmod +x "$GITHUB_WORKSPACE/android/gradlew"
+
+      - name: Flutter analyze
+        run: flutter analyze --no-fatal-infos
 
       - name: Build APK
         run: flutter build apk --release
@@ -40,3 +51,4 @@ jobs:
         with:
           name: HTPoWiFi-release
           path: build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
