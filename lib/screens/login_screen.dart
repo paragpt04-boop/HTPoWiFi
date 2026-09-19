@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import '../models/router_config.dart';
+import '../models/router_config.dart' as app_router;
 import '../providers/router_provider.dart';
 import '../utils/app_theme.dart';
 import 'home_screen.dart';
@@ -41,7 +41,7 @@ class _LoginScreenState extends State<LoginScreen> {
 
   Future<void> _connect() async {
     if (_hostCtl.text.trim().isEmpty) return;
-    final config = RouterConfig(
+    final config = app_router.RouterConfig(
       host: _hostCtl.text.trim(),
       port: int.tryParse(_portCtl.text.trim()) ?? 80,
       username: _userCtl.text.trim(),
