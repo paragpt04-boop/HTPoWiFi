@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../models/active_session.dart';
 import '../providers/router_provider.dart';
+import '../services/mikrotik_api.dart';
 import '../utils/app_theme.dart';
 
 class ActiveTab extends StatefulWidget {
@@ -26,15 +27,31 @@ class _ActiveTabState extends State<ActiveTab> {
 
   Future<void> _load() async {
     final api = context.read<RouterProvider>().api;
-    if (api != null) {
-      final sessions = await api.getActiveSessions();
-      if (mounted) {
-        setState(() {
-          _sessions = sessions;
-          _loading = false;
-        });
-      }
+    if (api == null) {
+      if (mounted) setState(() => _loading = false);
+      return;
     }
+    try {
+      final sessions = await api.getActiveSessions();
+      if (!mounted) return;
+      setState(() {
+        _sessions = sessions;
+        _loading = false;
+      });
+    } on MikroTikException catch (e) {
+      if (!mounted) return;
+      setState(() => _loading = false);
+      _snack(e.message, isError: true);
+    }
+  }
+
+  void _snack(String msg, {bool isError = false}) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(msg),
+      backgroundColor: isError ? AppTheme.error : AppTheme.success,
+      duration: Duration(seconds: isError ? 6 : 2),
+    ));
   }
 
   Future<void> _disconnect(ActiveSession session) async {
@@ -60,13 +77,13 @@ class _ActiveTabState extends State<ActiveTab> {
     );
     if (confirm == true) {
       final api = context.read<RouterProvider>().api;
-      final ok = await api?.disconnectSession(session.id!) ?? false;
-      if (ok) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text('Usuario desconectado'),
-          backgroundColor: AppTheme.success,
-        ));
+      if (api == null) return;
+      try {
+        await api.disconnectSession(session.id!);
+        _snack('Usuario desconectado');
         _load();
+      } on MikroTikException catch (e) {
+        _snack(e.message, isError: true);
       }
     }
   }
@@ -94,9 +111,17 @@ class _ActiveTabState extends State<ActiveTab> {
     );
     if (confirm == true) {
       final api = context.read<RouterProvider>().api;
+      if (api == null) return;
+      String? err;
       for (final s in _sessions) {
-        if (s.id != null) await api?.disconnectSession(s.id!);
+        if (s.id == null) continue;
+        try {
+          await api.disconnectSession(s.id!);
+        } on MikroTikException catch (e) {
+          err ??= e.message;
+        }
       }
+      if (err != null) _snack(err, isError: true);
       _load();
     }
   }

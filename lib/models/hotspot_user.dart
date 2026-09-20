@@ -77,16 +77,24 @@ class HotspotUser {
 
   static Duration _parseDuration(String s) {
     if (s.isEmpty || s == '0s') return Duration.zero;
-    int days = 0, hours = 0, minutes = 0, seconds = 0;
+    int weeks = 0, days = 0, hours = 0, minutes = 0, seconds = 0;
+    final wMatch = RegExp(r'(\d+)w').firstMatch(s);
     final dMatch = RegExp(r'(\d+)d').firstMatch(s);
     final hMatch = RegExp(r'(\d+)h').firstMatch(s);
-    final mMatch = RegExp(r'(\d+)m').firstMatch(s);
+    // (?!s) evita que "20s" se lea como minutos en cadenas tipo "1h20s"
+    final mMatch = RegExp(r'(\d+)m(?!s)').firstMatch(s);
     final sMatch = RegExp(r'(\d+)s').firstMatch(s);
+    if (wMatch != null) weeks = int.parse(wMatch.group(1)!);
     if (dMatch != null) days = int.parse(dMatch.group(1)!);
     if (hMatch != null) hours = int.parse(hMatch.group(1)!);
     if (mMatch != null) minutes = int.parse(mMatch.group(1)!);
     if (sMatch != null) seconds = int.parse(sMatch.group(1)!);
-    return Duration(days: days, hours: hours, minutes: minutes, seconds: seconds);
+    return Duration(
+      days: weeks * 7 + days,
+      hours: hours,
+      minutes: minutes,
+      seconds: seconds,
+    );
   }
 
   static String _formatDuration(Duration d) {

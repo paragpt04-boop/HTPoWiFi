@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../models/hotspot_user.dart';
 import '../providers/router_provider.dart';
+import '../services/mikrotik_api.dart';
 import '../utils/app_theme.dart';
 
 class UsersTab extends StatefulWidget {
@@ -26,24 +27,33 @@ class _UsersTabState extends State<UsersTab> {
   Future<void> _load() async {
     setState(() => _loading = true);
     final api = context.read<RouterProvider>().api;
-    if (api != null) {
+    if (api == null) {
+      if (mounted) setState(() => _loading = false);
+      return;
+    }
+    try {
       final users = await api.getUsers();
-      if (mounted) {
-        setState(() {
-          _users = users;
-          _filtered = users;
-          _loading = false;
-        });
-      }
+      if (!mounted) return;
+      setState(() {
+        _users = users;
+        _filtered = _applyFilter(users, _searchCtl.text);
+        _loading = false;
+      });
+    } on MikroTikException catch (e) {
+      if (!mounted) return;
+      setState(() => _loading = false);
+      _showSnack(e.message, isError: true);
     }
   }
 
+  List<HotspotUser> _applyFilter(List<HotspotUser> src, String query) {
+    if (query.trim().isEmpty) return src;
+    final q = query.toLowerCase();
+    return src.where((u) => u.name.toLowerCase().contains(q)).toList();
+  }
+
   void _filter(String query) {
-    setState(() {
-      _filtered = _users
-          .where((u) => u.name.toLowerCase().contains(query.toLowerCase()))
-          .toList();
-    });
+    setState(() => _filtered = _applyFilter(_users, query));
   }
 
   Future<void> _deleteUser(HotspotUser user) async {
@@ -68,12 +78,13 @@ class _UsersTabState extends State<UsersTab> {
     );
     if (confirm == true && user.id != null) {
       final api = context.read<RouterProvider>().api;
-      final ok = await api?.deleteUser(user.id!) ?? false;
-      if (ok) {
+      if (api == null) return;
+      try {
+        await api.deleteUser(user.id!);
         _showSnack('Usuario eliminado');
         _load();
-      } else {
-        _showSnack('Error al eliminar', isError: true);
+      } on MikroTikException catch (e) {
+        _showSnack(e.message, isError: true);
       }
     }
   }
@@ -81,22 +92,26 @@ class _UsersTabState extends State<UsersTab> {
   Future<void> _resetUptime(HotspotUser user) async {
     if (user.id == null) return;
     final api = context.read<RouterProvider>().api;
-    final ok = await api?.resetUserUptime(user.id!) ?? false;
-    if (ok) {
+    if (api == null) return;
+    try {
+      await api.resetUserUptime(user.id!);
       _showSnack('Tiempo reiniciado');
       _load();
-    } else {
-      _showSnack('Error al reiniciar', isError: true);
+    } on MikroTikException catch (e) {
+      _showSnack(e.message, isError: true);
     }
   }
 
   Future<void> _toggleUser(HotspotUser user) async {
     if (user.id == null) return;
     final api = context.read<RouterProvider>().api;
-    final ok = await api?.toggleUser(user.id!, !user.disabled) ?? false;
-    if (ok) {
+    if (api == null) return;
+    try {
+      await api.toggleUser(user.id!, !user.disabled);
       _showSnack(user.disabled ? 'Usuario habilitado' : 'Usuario deshabilitado');
       _load();
+    } on MikroTikException catch (e) {
+      _showSnack(e.message, isError: true);
     }
   }
 
@@ -104,14 +119,17 @@ class _UsersTabState extends State<UsersTab> {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(
       content: Text(msg),
       backgroundColor: isError ? AppTheme.error : AppTheme.success,
-      duration: const Duration(seconds: 2),
+      duration: Duration(seconds: isError ? 6 : 2),
     ));
   }
 
   void _showAddDialog() {
+    final prov = context.read<RouterProvider>();
     final nameCtl = TextEditingController();
     final passCtl = TextEditingController();
     String selectedTime = '1h';
+    String selectedServer = prov.selectedServer;
+    String selectedProfile = prov.selectedProfile;
     final times = ['5m', '30m', '1h', '2h', '5h', '12h', '1d', '3d', '7d', '30d'];
 
     showDialog(
@@ -161,6 +179,42 @@ class _UsersTabState extends State<UsersTab> {
                       .toList(),
                   onChanged: (v) => setDlgState(() => selectedTime = v!),
                 ),
+                const SizedBox(height: 12),
+                DropdownButtonFormField<String>(
+                  value: prov.servers.contains(selectedServer)
+                      ? selectedServer
+                      : prov.servers.first,
+                  dropdownColor: AppTheme.cardLight,
+                  style: const TextStyle(color: AppTheme.textPrimary),
+                  decoration: const InputDecoration(
+                    labelText: 'Servidor hotspot',
+                    prefixIcon:
+                        Icon(Icons.dns, color: AppTheme.textSecondary),
+                  ),
+                  items: prov.servers
+                      .map((sv) =>
+                          DropdownMenuItem(value: sv, child: Text(sv)))
+                      .toList(),
+                  onChanged: (v) => setDlgState(() => selectedServer = v!),
+                ),
+                const SizedBox(height: 12),
+                DropdownButtonFormField<String>(
+                  value: prov.profiles.contains(selectedProfile)
+                      ? selectedProfile
+                      : prov.profiles.first,
+                  dropdownColor: AppTheme.cardLight,
+                  style: const TextStyle(color: AppTheme.textPrimary),
+                  decoration: const InputDecoration(
+                    labelText: 'Perfil',
+                    prefixIcon: Icon(Icons.speed,
+                        color: AppTheme.textSecondary),
+                  ),
+                  items: prov.profiles
+                      .map((pf) =>
+                          DropdownMenuItem(value: pf, child: Text(pf)))
+                      .toList(),
+                  onChanged: (v) => setDlgState(() => selectedProfile = v!),
+                ),
               ],
             ),
           ),
@@ -170,21 +224,29 @@ class _UsersTabState extends State<UsersTab> {
                 child: const Text('Cancelar')),
             ElevatedButton(
               onPressed: () async {
-                if (nameCtl.text.isEmpty || passCtl.text.isEmpty) return;
+                if (nameCtl.text.trim().isEmpty ||
+                    passCtl.text.trim().isEmpty) {
+                  return;
+                }
                 Navigator.pop(ctx);
                 final api = context.read<RouterProvider>().api;
+                if (api == null) {
+                  _showSnack('Sin conexion al router', isError: true);
+                  return;
+                }
                 final user = HotspotUser(
                   name: nameCtl.text.trim(),
                   password: passCtl.text.trim(),
-                  server: 'hotspot-nauta',
+                  server: selectedServer,
+                  profile: selectedProfile,
                   limitUptime: selectedTime,
                 );
-                final ok = await api?.addUser(user) ?? false;
-                if (ok) {
+                try {
+                  await api.addUser(user);
                   _showSnack('Usuario creado');
                   _load();
-                } else {
-                  _showSnack('Error al crear usuario', isError: true);
+                } on MikroTikException catch (e) {
+                  _showSnack(e.message, isError: true);
                 }
               },
               child: const Text('Crear'),

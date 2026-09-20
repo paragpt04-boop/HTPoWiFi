@@ -1,7 +1,10 @@
 import 'dart:convert';
+
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
 import '../models/router_config.dart';
+import '../models/hotspot_profile.dart';
 import '../services/mikrotik_api.dart';
 
 class RouterProvider extends ChangeNotifier {
@@ -11,18 +14,43 @@ class RouterProvider extends ChangeNotifier {
   bool _isLoading = false;
   String? _error;
 
+  List<String> _servers = <String>['all'];
+  List<String> _profiles = <String>['default'];
+  String _selectedServer = 'all';
+  String _selectedProfile = 'default';
+
   RouterConfig? get config => _config;
   MikroTikApi? get api => _api;
   bool get isConnected => _isConnected;
   bool get isLoading => _isLoading;
   String? get error => _error;
 
+  List<String> get servers => _servers;
+  List<String> get profiles => _profiles;
+  String get selectedServer => _selectedServer;
+  String get selectedProfile => _selectedProfile;
+
+  void setServer(String value) {
+    _selectedServer = value;
+    notifyListeners();
+  }
+
+  void setProfile(String value) {
+    _selectedProfile = value;
+    notifyListeners();
+  }
+
   Future<void> loadSavedConfig() async {
-    final prefs = await SharedPreferences.getInstance();
-    final saved = prefs.getString('router_config');
+    final SharedPreferences prefs = await SharedPreferences.getInstance();
+    final String? saved = prefs.getString('router_config');
     if (saved != null) {
-      _config = RouterConfig.fromJson(jsonDecode(saved));
-      notifyListeners();
+      try {
+        _config = RouterConfig.fromJson(
+            jsonDecode(saved) as Map<String, dynamic>);
+        notifyListeners();
+      } catch (_) {
+        // config guardada corrupta: se ignora
+      }
     }
   }
 
@@ -32,24 +60,76 @@ class RouterProvider extends ChangeNotifier {
     notifyListeners();
 
     _api?.dispose();
-    _api = MikroTikApi(newConfig);
+    final MikroTikApi candidate = MikroTikApi(newConfig);
+    bool ok = false;
 
-    final ok = await _api!.testConnection();
+    try {
+      await candidate.testConnection();
+      ok = true;
+    } on MikroTikException catch (e) {
+      _error = e.message;
+    } catch (e) {
+      _error = 'Error inesperado al conectar: $e';
+    }
+
     if (ok) {
+      _api = candidate;
       _config = newConfig;
       _isConnected = true;
-      final prefs = await SharedPreferences.getInstance();
-      prefs.setString('router_config', jsonEncode(newConfig.toJson()));
+
+      final SharedPreferences prefs = await SharedPreferences.getInstance();
+      await prefs.setString('router_config', jsonEncode(newConfig.toJson()));
+
+      await _loadMeta();
     } else {
-      _error = 'No se pudo conectar. Verifica IP, usuario y contraseña.';
-      _isConnected = false;
-      _api?.dispose();
+      candidate.dispose();
       _api = null;
+      _isConnected = false;
     }
 
     _isLoading = false;
     notifyListeners();
     return ok;
+  }
+
+  /// Carga servidores hotspot y perfiles. Nunca tumba la conexion:
+  /// si el usuario del router no tiene permiso de lectura ahi, usa valores por defecto.
+  Future<void> _loadMeta() async {
+    final MikroTikApi? api = _api;
+    if (api == null) return;
+
+    List<String> servers = <String>[];
+    try {
+      servers = await api.getHotspotServers();
+    } catch (_) {
+      servers = <String>[];
+    }
+    // "all" permite que el usuario entre por cualquier servidor hotspot.
+    if (!servers.contains('all')) servers.insert(0, 'all');
+    _servers = servers;
+    if (!_servers.contains(_selectedServer)) _selectedServer = 'all';
+
+    List<String> profiles = <String>[];
+    try {
+      final List<HotspotProfile> list = await api.getProfiles();
+      profiles = list
+          .map((HotspotProfile p) => p.name)
+          .where((String n) => n.isNotEmpty)
+          .toList();
+    } catch (_) {
+      profiles = <String>[];
+    }
+    if (profiles.isEmpty) profiles = <String>['default'];
+    _profiles = profiles;
+    if (!_profiles.contains(_selectedProfile)) {
+      _selectedProfile =
+          _profiles.contains('default') ? 'default' : _profiles.first;
+    }
+  }
+
+  Future<void> refreshMeta() async {
+    await _loadMeta();
+    notifyListeners();
   }
 
   void disconnect() {
@@ -61,8 +141,8 @@ class RouterProvider extends ChangeNotifier {
   }
 
   Future<void> clearSaved() async {
-    final prefs = await SharedPreferences.getInstance();
-    prefs.remove('router_config');
+    final SharedPreferences prefs = await SharedPreferences.getInstance();
+    await prefs.remove('router_config');
     _config = null;
     disconnect();
   }

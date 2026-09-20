@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import '../models/hotspot_user.dart';
 import '../providers/router_provider.dart';
+import '../services/mikrotik_api.dart';
 import '../utils/app_theme.dart';
 
 class CardsTab extends StatefulWidget {
@@ -39,40 +40,73 @@ class _CardsTabState extends State<CardsTab> {
       return;
     }
 
-    setState(() => _generating = true);
+    final prov = context.read<RouterProvider>();
+    final api = prov.api;
+    if (api == null) {
+      _showSnack('Sin conexion al router', isError: true);
+      return;
+    }
 
-    final api = context.read<RouterProvider>().api;
-    if (api == null) return;
+    setState(() => _generating = true);
 
     final cards = <_CardData>[];
     final rng = Random();
-    int created = 0;
+    String? firstError;
+
+    // Nombres ya existentes en el router: evita colisiones silenciosas.
+    Set<String> taken;
+    try {
+      taken = await api.getUserNames();
+    } on MikroTikException catch (e) {
+      if (mounted) setState(() => _generating = false);
+      _showSnack(e.message, isError: true);
+      return;
+    }
 
     for (int i = 0; i < qty; i++) {
-      final code = rng.nextInt(900000) + 100000;
-      final name = '${_prefix}$code';
-      final pass = '${rng.nextInt(9000) + 1000}';
+      String name = '';
+      for (int attempt = 0; attempt < 50; attempt++) {
+        final candidate = '$_prefix${rng.nextInt(900000) + 100000}';
+        if (!taken.contains(candidate)) {
+          name = candidate;
+          break;
+        }
+      }
+      if (name.isEmpty) {
+        firstError ??= 'No se pudieron generar nombres unicos.';
+        break;
+      }
+      taken.add(name);
 
+      final pass = '${rng.nextInt(9000) + 1000}';
       final user = HotspotUser(
         name: name,
         password: pass,
-        server: 'hotspot-nauta',
+        server: prov.selectedServer,
+        profile: prov.selectedProfile,
         limitUptime: _selectedTime,
       );
 
-      final ok = await api.addUser(user);
-      if (ok) {
+      try {
+        await api.addUser(user);
         cards.add(_CardData(name: name, password: pass, time: _selectedTime));
-        created++;
+      } on MikroTikException catch (e) {
+        firstError ??= e.message;
+        break;
       }
     }
 
+    if (!mounted) return;
     setState(() {
       _generated = cards;
       _generating = false;
     });
 
-    _showSnack('$created tarjetas creadas');
+    if (firstError != null) {
+      _showSnack('Creadas ${cards.length} de $qty. $firstError', isError: true);
+    } else {
+      _showSnack('${cards.length} tarjetas creadas');
+    }
   }
 
   void _copyAll() {
@@ -88,7 +122,7 @@ class _CardsTabState extends State<CardsTab> {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(
       content: Text(msg),
       backgroundColor: isError ? AppTheme.error : AppTheme.success,
-      duration: const Duration(seconds: 2),
+      duration: Duration(seconds: isError ? 6 : 2),
     ));
   }
 
@@ -168,6 +202,63 @@ class _CardsTabState extends State<CardsTab> {
                     ),
                   ),
                 ],
+              ),
+              const SizedBox(height: 12),
+              // Servidor + Perfil (leidos del router)
+              Consumer<RouterProvider>(
+                builder: (ctx, prov, _) => Row(
+                  children: [
+                    Expanded(
+                      child: DropdownButtonFormField<String>(
+                        value: prov.servers.contains(prov.selectedServer)
+                            ? prov.selectedServer
+                            : prov.servers.first,
+                        dropdownColor: AppTheme.cardLight,
+                        isExpanded: true,
+                        style: const TextStyle(color: AppTheme.textPrimary),
+                        decoration: const InputDecoration(
+                          labelText: 'Servidor',
+                          prefixIcon:
+                              Icon(Icons.dns, color: AppTheme.textSecondary),
+                        ),
+                        items: prov.servers
+                            .map((sv) => DropdownMenuItem(
+                                value: sv,
+                                child: Text(sv,
+                                    overflow: TextOverflow.ellipsis)))
+                            .toList(),
+                        onChanged: (v) {
+                          if (v != null) prov.setServer(v);
+                        },
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: DropdownButtonFormField<String>(
+                        value: prov.profiles.contains(prov.selectedProfile)
+                            ? prov.selectedProfile
+                            : prov.profiles.first,
+                        dropdownColor: AppTheme.cardLight,
+                        isExpanded: true,
+                        style: const TextStyle(color: AppTheme.textPrimary),
+                        decoration: const InputDecoration(
+                          labelText: 'Perfil',
+                          prefixIcon:
+                              Icon(Icons.speed, color: AppTheme.textSecondary),
+                        ),
+                        items: prov.profiles
+                            .map((pf) => DropdownMenuItem(
+                                value: pf,
+                                child: Text(pf,
+                                    overflow: TextOverflow.ellipsis)))
+                            .toList(),
+                        onChanged: (v) {
+                          if (v != null) prov.setProfile(v);
+                        },
+                      ),
+                    ),
+                  ],
+                ),
               ),
               const SizedBox(height: 16),
               // Generate button

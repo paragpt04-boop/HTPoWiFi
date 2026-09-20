@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../providers/router_provider.dart';
+import '../services/mikrotik_api.dart';
 import '../utils/app_theme.dart';
 
 class DashboardTab extends StatefulWidget {
@@ -24,16 +25,27 @@ class _DashboardTabState extends State<DashboardTab> {
   Future<void> _refresh() async {
     setState(() => _loading = true);
     final api = context.read<RouterProvider>().api;
-    if (api != null) {
+    if (api == null) {
+      if (mounted) setState(() => _loading = false);
+      return;
+    }
+    try {
       final stats = await api.getStats();
       final info = await api.getSystemInfo();
-      if (mounted) {
-        setState(() {
-          _stats = stats;
-          _sysInfo = info;
-          _loading = false;
-        });
-      }
+      if (!mounted) return;
+      setState(() {
+        _stats = stats;
+        _sysInfo = info;
+        _loading = false;
+      });
+    } on MikroTikException catch (e) {
+      if (!mounted) return;
+      setState(() => _loading = false);
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(e.message),
+        backgroundColor: AppTheme.error,
+        duration: const Duration(seconds: 6),
+      ));
     }
   }
 
