@@ -34,10 +34,9 @@ class MikroTikApi {
 
     // RouterOS usa certificado autofirmado en HTTPS: hay que aceptarlo
     // o la conexion falla siempre con el switch de HTTPS activado.
-    final HttpClient io = HttpClient()
-      ..badCertificateCallback =
-          (X509Certificate cert, String host, int port) => true
-      ..connectionTimeout = const Duration(seconds: 12);
+    final HttpClient io = HttpClient();
+    io.badCertificateCallback = (X509Certificate cert, String host, int port) => true;
+    io.connectionTimeout = const Duration(seconds: 12);
 
     _client = IOClient(io);
   }
