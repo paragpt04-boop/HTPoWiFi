@@ -5,7 +5,11 @@ import '../services/mikrotik_api.dart';
 import '../utils/app_theme.dart';
 
 class DashboardTab extends StatefulWidget {
-  const DashboardTab({super.key});
+  /// Callback para navegar a otra pestaña del HomeScreen.
+  /// índices: 0=Dashboard, 1=Usuarios, 2=Activos, 3=Tarjetas
+  final ValueChanged<int>? onNavigate;
+
+  const DashboardTab({super.key, this.onNavigate});
 
   @override
   State<DashboardTab> createState() => _DashboardTabState();
@@ -64,7 +68,7 @@ class _DashboardTabState extends State<DashboardTab> {
           // Router info card
           _buildRouterInfoCard(),
           const SizedBox(height: 16),
-          // Stats grid
+          // Stats grid — cada tile es navegable
           Row(
             children: [
               Expanded(
@@ -73,6 +77,7 @@ class _DashboardTabState extends State<DashboardTab> {
                   label: 'Total Usuarios',
                   value: '${_stats['totalUsers'] ?? 0}',
                   color: AppTheme.primary,
+                  onTap: () => widget.onNavigate?.call(1),
                 ),
               ),
               const SizedBox(width: 12),
@@ -82,6 +87,7 @@ class _DashboardTabState extends State<DashboardTab> {
                   label: 'Conectados',
                   value: '${_stats['activeNow'] ?? 0}',
                   color: AppTheme.success,
+                  onTap: () => widget.onNavigate?.call(2),
                 ),
               ),
             ],
@@ -95,6 +101,7 @@ class _DashboardTabState extends State<DashboardTab> {
                   label: 'Disponibles',
                   value: '${_stats['available'] ?? 0}',
                   color: AppTheme.accent,
+                  onTap: () => widget.onNavigate?.call(1),
                 ),
               ),
               const SizedBox(width: 12),
@@ -104,6 +111,7 @@ class _DashboardTabState extends State<DashboardTab> {
                   label: 'Expirados',
                   value: '${_stats['expired'] ?? 0}',
                   color: AppTheme.warning,
+                  onTap: () => widget.onNavigate?.call(1),
                 ),
               ),
             ],
@@ -122,13 +130,18 @@ class _DashboardTabState extends State<DashboardTab> {
             children: [
               _QuickAction(
                 icon: Icons.person_add,
-                label: 'Crear Usuario',
-                onTap: () => DefaultTabController.of(context),
+                label: 'Ver Usuarios',
+                onTap: () => widget.onNavigate?.call(1),
+              ),
+              _QuickAction(
+                icon: Icons.wifi,
+                label: 'Sesiones Activas',
+                onTap: () => widget.onNavigate?.call(2),
               ),
               _QuickAction(
                 icon: Icons.card_membership,
-                label: 'Generar Tarjetas',
-                onTap: () {},
+                label: 'Tarjetas',
+                onTap: () => widget.onNavigate?.call(3),
               ),
               _QuickAction(
                 icon: Icons.refresh,
@@ -218,36 +231,55 @@ class _StatCard extends StatelessWidget {
   final String label;
   final String value;
   final Color color;
+  final VoidCallback? onTap;
 
   const _StatCard({
     required this.icon,
     required this.label,
     required this.value,
     required this.color,
+    this.onTap,
   });
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: AppTheme.card,
+    return Material(
+      color: AppTheme.card,
+      borderRadius: BorderRadius.circular(12),
+      child: InkWell(
+        onTap: onTap,
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: AppTheme.divider, width: 0.5),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Icon(icon, color: color, size: 24),
-          const SizedBox(height: 10),
-          Text(value,
-              style: TextStyle(
-                  color: color, fontSize: 28, fontWeight: FontWeight.bold)),
-          const SizedBox(height: 2),
-          Text(label,
-              style:
-                  const TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
-        ],
+        child: Container(
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: AppTheme.divider, width: 0.5),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Icon(icon, color: color, size: 24),
+                  if (onTap != null)
+                    Icon(Icons.arrow_forward_ios,
+                        color: color.withOpacity(0.5), size: 12),
+                ],
+              ),
+              const SizedBox(height: 10),
+              Text(value,
+                  style: TextStyle(
+                      color: color,
+                      fontSize: 28,
+                      fontWeight: FontWeight.bold)),
+              const SizedBox(height: 2),
+              Text(label,
+                  style: const TextStyle(
+                      color: AppTheme.textSecondary, fontSize: 12)),
+            ],
+          ),
+        ),
       ),
     );
   }

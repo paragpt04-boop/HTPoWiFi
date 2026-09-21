@@ -18,12 +18,14 @@ class RouterProvider extends ChangeNotifier {
   List<String> _profiles = <String>['default'];
   String _selectedServer = 'all';
   String _selectedProfile = 'default';
+  bool _hotspotConfigured = false;
 
   RouterConfig? get config => _config;
   MikroTikApi? get api => _api;
   bool get isConnected => _isConnected;
   bool get isLoading => _isLoading;
   String? get error => _error;
+  bool get hotspotConfigured => _hotspotConfigured;
 
   List<String> get servers => _servers;
   List<String> get profiles => _profiles;
@@ -104,6 +106,7 @@ class RouterProvider extends ChangeNotifier {
     } catch (_) {
       servers = <String>[];
     }
+    _hotspotConfigured = servers.isNotEmpty;
     // "all" permite que el usuario entre por cualquier servidor hotspot.
     if (!servers.contains('all')) servers.insert(0, 'all');
     _servers = servers;

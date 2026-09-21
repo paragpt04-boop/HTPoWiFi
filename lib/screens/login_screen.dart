@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../models/router_config.dart' as app_router;
+import '../providers/auth_provider.dart';
 import '../providers/router_provider.dart';
 import '../utils/app_theme.dart';
-import 'home_screen.dart';
+import 'role_screen.dart';
+import 'setup_wizard_screen.dart';
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -49,12 +51,22 @@ class _LoginScreenState extends State<LoginScreen> {
       useSsl: _useSsl,
     );
     final prov = context.read<RouterProvider>();
+    final auth = context.read<AuthProvider>();
     final ok = await prov.connect(config);
     if (ok && mounted) {
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(builder: (_) => const HomeScreen()),
-      );
+      await auth.load();
+      if (!mounted) return;
+      if (!prov.hotspotConfigured) {
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(builder: (_) => const SetupWizardScreen()),
+        );
+      } else {
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(builder: (_) => const RoleScreen()),
+        );
+      }
     }
   }
 

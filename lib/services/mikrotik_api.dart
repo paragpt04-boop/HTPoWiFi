@@ -285,6 +285,132 @@ class MikroTikApi {
         .toList();
   }
 
+  /// true si hay al menos un servidor hotspot configurado
+  Future<bool> isHotspotConfigured() async {
+    try {
+      final List<String> servers = await getHotspotServers();
+      return servers.isNotEmpty;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Todas las interfaces del router
+  Future<List<Map<String, dynamic>>> getInterfaces() async {
+    return await _getList('/interface');
+  }
+
+  /// Mapa username → password para mostrar en sesiones activas
+  Future<Map<String, String>> getUserPasswordMap() async {
+    final List<Map<String, dynamic>> list = await _getList('/ip/hotspot/user');
+    final Map<String, String> map = <String, String>{};
+    for (final Map<String, dynamic> u in list) {
+      final String name = (u['name'] ?? '').toString();
+      final String pass = (u['password'] ?? '').toString();
+      if (name.isNotEmpty) map[name] = pass;
+    }
+    return map;
+  }
+
+  /// Configura el hotspot completo desde cero
+  Future<void> setupHotspot({
+    required String interface,
+    required String gatewayIp,
+    required String networkCidr,
+    required String poolRange,
+    required String serverName,
+    void Function(String)? onProgress,
+  }) async {
+    final String prefix = networkCidr.split('/').last;
+
+    void log(String msg) => onProgress?.call(msg);
+
+    // 1. IP en la interfaz
+    log('Asignando IP $gatewayIp a $interface...');
+    try {
+      await _send('PUT', '/ip/address', body: <String, dynamic>{
+        'address': '$gatewayIp/$prefix',
+        'interface': interface,
+      });
+    } on MikroTikException catch (e) {
+      // 400 = ya existe la IP, ignorar
+      if (e.statusCode != 400) rethrow;
+      log('  IP ya asignada, continuando.');
+    }
+
+    // 2. Pool
+    log('Creando pool $poolRange...');
+    try {
+      await _send('PUT', '/ip/pool', body: <String, dynamic>{
+        'name': 'hs-pool',
+        'ranges': poolRange,
+      });
+    } on MikroTikException catch (e) {
+      if (e.statusCode != 400) rethrow;
+      log('  Pool ya existe, continuando.');
+    }
+
+    // 3. DHCP server
+    log('Configurando DHCP en $interface...');
+    try {
+      await _send('PUT', '/ip/dhcp-server', body: <String, dynamic>{
+        'name': 'dhcp-hotspot',
+        'interface': interface,
+        'address-pool': 'hs-pool',
+        'lease-time': '10m',
+        'disabled': 'false',
+      });
+    } on MikroTikException catch (e) {
+      if (e.statusCode != 400) rethrow;
+      log('  DHCP ya existe, continuando.');
+    }
+
+    // 4. DHCP network
+    try {
+      await _send('PUT', '/ip/dhcp-server/network', body: <String, dynamic>{
+        'address': networkCidr,
+        'gateway': gatewayIp,
+        'dns-server': gatewayIp,
+      });
+    } on MikroTikException catch (e) {
+      if (e.statusCode != 400) rethrow;
+    }
+
+    // 5. Server profile
+    log('Creando perfil de servidor hotspot...');
+    try {
+      await _send('PUT', '/ip/hotspot/profile', body: <String, dynamic>{
+        'name': 'hsprof1',
+        'hotspot-address': gatewayIp,
+        'dns-name': '',
+        'use-radius': 'false',
+      });
+    } on MikroTikException catch (e) {
+      if (e.statusCode != 400) rethrow;
+      log('  Perfil ya existe, continuando.');
+    }
+
+    // 6. User profile (default puede existir)
+    log('Configurando perfil de usuario default...');
+    try {
+      await _send('PUT', '/ip/hotspot/user/profile', body: <String, dynamic>{
+        'name': 'default',
+        'session-timeout': '1h',
+        'shared-users': '1',
+      });
+    } catch (_) {}
+
+    // 7. Hotspot server
+    log('Creando servidor hotspot $serverName...');
+    await _send('PUT', '/ip/hotspot', body: <String, dynamic>{
+      'name': serverName,
+      'interface': interface,
+      'address-pool': 'hs-pool',
+      'profile': 'hsprof1',
+      'disabled': 'false',
+    });
+  }
+
   // ─── Stats ────────────────────────────────────────────────
   Future<Map<String, int>> getStats() async {
     final List<HotspotUser> users = await getUsers();
