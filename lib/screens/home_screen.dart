@@ -19,9 +19,13 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen> {
   int _currentIndex = 0;
+  UserFilter _usersFilter = UserFilter.all;
 
-  void _navigateTo(int index) {
-    setState(() => _currentIndex = index);
+  void _navigateTo(int index, {UserFilter? filter}) {
+    setState(() {
+      _currentIndex = index;
+      if (filter != null) _usersFilter = filter;
+    });
   }
 
   @override
@@ -35,7 +39,9 @@ class _HomeScreenState extends State<HomeScreen> {
     // Vendor ve: solo Tarjetas
     final List<Widget> adminTabs = [
       DashboardTab(onNavigate: _navigateTo),
-      const UsersTab(),
+      UsersTab(
+          key: ValueKey<UserFilter>(_usersFilter),
+          initialFilter: _usersFilter),
       const ActiveTab(),
       const CardsTab(),
     ];
@@ -158,7 +164,11 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
               child: BottomNavigationBar(
                 currentIndex: safeIndex,
-                onTap: (i) => setState(() => _currentIndex = i),
+                onTap: (i) => setState(() {
+                  _currentIndex = i;
+                  // Desde la barra inferior Usuarios abre siempre en "Todos"
+                  if (!isVendor && i == 1) _usersFilter = UserFilter.all;
+                }),
                 items: navItems,
               ),
             ),

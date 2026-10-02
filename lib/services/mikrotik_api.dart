@@ -9,6 +9,7 @@ import '../models/router_config.dart';
 import '../models/hotspot_user.dart';
 import '../models/hotspot_profile.dart';
 import '../models/active_session.dart';
+import '../utils/ros_time.dart';
 
 /// Error con mensaje legible para mostrar directamente en pantalla.
 class MikroTikException implements Exception {
@@ -231,9 +232,172 @@ class MikroTikApi {
     await _send('DELETE', '/ip/hotspot/user/${_encodeId(id)}');
   }
 
-  Future<void> resetUserUptime(String id) async {
-    await _send('PATCH', '/ip/hotspot/user/${_encodeId(id)}',
-        body: <String, dynamic>{'uptime': '0s'});
+  /// Reinicia el tiempo consumido (y el tráfico) del usuario con el comando
+  /// nativo `reset-counters`. Si [user] tiene etiqueta [EXP:...], la quita.
+  Future<void> resetUserUptime(String id, {HotspotUser? user}) async {
+    try {
+      await _send('POST', '/ip/hotspot/user/reset-counters',
+          body: <String, dynamic>{'numbers': id});
+    } on MikroTikException catch (e) {
+      if (e.statusCode != 400) rethrow;
+      await _send('POST', '/ip/hotspot/user/reset-counters',
+          body: <String, dynamic>{'.id': id});
+    }
+    if (user != null && user.hasExpTag) {
+      await updateUser(id, <String, dynamic>{'comment': user.cleanComment});
+    }
+  }
+
+  /// Renueva un usuario expirado: nuevo límite, contador a cero,
+  /// sin etiqueta de expiración y habilitado.
+  Future<void> renewUser(HotspotUser user, String newLimit) async {
+    if (user.id == null) return;
+    await updateUser(user.id!, <String, dynamic>{
+      'limit-uptime': newLimit,
+      'comment': user.cleanComment,
+      'disabled': 'false',
+    });
+    await resetUserUptime(user.id!);
+  }
+
+  // ─── Registro de expiración ───────────────────────────────
+  static const String expiryScheduler = 'htpowifi-expiry';
+
+  /// Script que corre cada minuto en el router. Cuando un usuario llega a su
+  /// limit-uptime escribe "[EXP:fecha hora]" en el comentario; si después se
+  /// le reinicia el tiempo (desde la app o Winbox) quita la etiqueta.
+  static const String _expiryScript = r'''
+:local now ([/system clock get date] . " " . [/system clock get time])
+:foreach u in=[/ip hotspot user find] do={
+  :local lim [/ip hotspot user get $u limit-uptime]
+  :if ([:typeof $lim] = "time") do={
+    :if ($lim > 0s) do={
+      :local up [/ip hotspot user get $u uptime]
+      :local c [/ip hotspot user get $u comment]
+      :if ([:typeof $c] != "str") do={ :set c "" }
+      :local p [:find $c "[EXP:"]
+      :if ($up >= $lim) do={
+        :if ([:typeof $p] = "nil") do={
+          :if ([:len $c] > 0) do={ :set c ($c . " ") }
+          /ip hotspot user set $u comment=($c . "[EXP:" . $now . "]")
+        }
+      } else={
+        :if ([:typeof $p] != "nil") do={
+          :local e [:find $c "]" $p]
+          :local a [:pick $c 0 $p]
+          :local b ""
+          :if ([:typeof $e] != "nil") do={ :set b [:pick $c ($e + 1) [:len $c]] }
+          :if ([:len $a] > 0) do={
+            :if ([:pick $a ([:len $a] - 1)] = " ") do={ :set a [:pick $a 0 ([:len $a] - 1)] }
+          }
+          /ip hotspot user set $u comment=($a . $b)
+        }
+      }
+    }
+  }
+}
+''';
+
+  /// true si el scheduler del registro de expiración existe y está activo.
+  Future<bool> isExpiryTrackerInstalled() async {
+    final List<Map<String, dynamic>> list = await _getList('/system/scheduler');
+    return list.any((Map<String, dynamic> s) =>
+        s['name'] == expiryScheduler && s['disabled'] != 'true');
+  }
+
+  /// Crea (o actualiza) el scheduler del registro de expiración.
+  /// No toca perfiles ni scripts existentes.
+  Future<void> installExpiryTracker() async {
+    final List<Map<String, dynamic>> list = await _getList('/system/scheduler');
+    final Map<String, dynamic> body = <String, dynamic>{
+      'interval': '1m',
+      'on-event': _expiryScript,
+      'policy': 'read,write,test',
+      'disabled': 'false',
+      'comment': 'HTPoWiFi - registra la hora de expiracion de usuarios hotspot',
+    };
+    Map<String, dynamic>? existing;
+    for (final Map<String, dynamic> s in list) {
+      if (s['name'] == expiryScheduler) existing = s;
+    }
+    if (existing != null && existing['.id'] != null) {
+      await _send('PATCH',
+          '/system/scheduler/${_encodeId(existing['.id'].toString())}',
+          body: body);
+    } else {
+      await _send('PUT', '/system/scheduler',
+          body: <String, dynamic>{'name': expiryScheduler, ...body});
+    }
+  }
+
+  /// Marca en el router los usuarios que ya estaban expirados antes de activar
+  /// el registro: usa la hora del log si existe, si no "[EXP:?]".
+  /// Devuelve cuántos usuarios se marcaron.
+  Future<int> backfillExpiryTags(
+      List<HotspotUser> users, Map<String, DateTime> logTimes) async {
+    int count = 0;
+    for (final HotspotUser u in users) {
+      if (u.id == null || !u.isExpired || u.hasExpTag) continue;
+      final DateTime? t = logTimes[u.name];
+      final String value = t == null ? '?' : _rosStamp(t);
+      await updateUser(u.id!, <String, dynamic>{'comment': u.commentWithTag(value)});
+      count++;
+    }
+    return count;
+  }
+
+  /// "2026-10-01 14:32:05" — formato ISO que entiende la app.
+  static String _rosStamp(DateTime d) {
+    String two(int n) => n.toString().padLeft(2, '0');
+    return '${d.year}-${two(d.month)}-${two(d.day)} '
+        '${two(d.hour)}:${two(d.minute)}:${two(d.second)}';
+  }
+
+  /// Fecha y hora actual del router (para calcular "hace cuánto").
+  Future<DateTime?> getRouterClock() async {
+    final List<Map<String, dynamic>> c = await _getList('/system/clock');
+    if (c.isEmpty) return null;
+    return RosTime.parseDateTime(
+        (c.first['date'] ?? '').toString(), (c.first['time'] ?? '').toString());
+  }
+
+  /// Último "logged out" de cada usuario según /log del router.
+  /// El log vive en RAM: se pierde al reiniciar y guarda ~1000 líneas.
+  Future<Map<String, DateTime>> getLastLogoutTimes(DateTime routerNow) async {
+    final Map<String, DateTime> result = <String, DateTime>{};
+    List<Map<String, dynamic>> logs;
+    try {
+      logs = await _getList('/log');
+    } catch (_) {
+      return result;
+    }
+    final RegExp re = RegExp(r'(\S+) \([0-9a-fA-F\.:]+\): logged out');
+    for (final Map<String, dynamic> l in logs) {
+      final String msg = (l['message'] ?? '').toString();
+      final Match? m = re.firstMatch(msg);
+      if (m == null) continue;
+      final DateTime? t =
+          RosTime.parseLogTime((l['time'] ?? '').toString(), routerNow);
+      if (t == null) continue;
+      final String user = m.group(1)!;
+      final DateTime? prev = result[user];
+      if (prev == null || t.isAfter(prev)) result[user] = t;
+    }
+    return result;
+  }
+
+  /// Elimina varios usuarios. Devuelve el primer error o null.
+  Future<String?> deleteUsers(List<HotspotUser> users) async {
+    String? err;
+    for (final HotspotUser u in users) {
+      if (u.id == null) continue;
+      try {
+        await deleteUser(u.id!);
+      } on MikroTikException catch (e) {
+        err ??= e.message;
+      }
+    }
+    return err;
   }
 
   Future<void> toggleUser(String id, bool disable) async {
@@ -416,13 +580,12 @@ class MikroTikApi {
     final List<HotspotUser> users = await getUsers();
     final List<Map<String, dynamic>> active =
         await _getList('/ip/hotspot/active');
-    final int expired =
-        users.where((HotspotUser u) => u.isExpired || u.disabled).length;
     return <String, int>{
       'totalUsers': users.length,
       'activeNow': active.length,
-      'expired': expired,
-      'available': users.length - expired,
+      'expired': users.where((HotspotUser u) => u.isExpired).length,
+      'disabled': users.where((HotspotUser u) => u.disabled).length,
+      'available': users.where((HotspotUser u) => u.isAvailable).length,
     };
   }
 }

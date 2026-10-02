@@ -3,11 +3,13 @@ import 'package:provider/provider.dart';
 import '../providers/router_provider.dart';
 import '../services/mikrotik_api.dart';
 import '../utils/app_theme.dart';
+import 'users_tab.dart' show UserFilter;
 
 class DashboardTab extends StatefulWidget {
   /// Callback para navegar a otra pestaña del HomeScreen.
-  /// índices: 0=Dashboard, 1=Usuarios, 2=Activos, 3=Tarjetas
-  final ValueChanged<int>? onNavigate;
+  /// índices: 0=Dashboard, 1=Usuarios, 2=Activos, 3=Tarjetas.
+  /// [filter] abre Usuarios con ese filtro ya aplicado.
+  final void Function(int index, {UserFilter? filter})? onNavigate;
 
   const DashboardTab({super.key, this.onNavigate});
 
@@ -77,7 +79,8 @@ class _DashboardTabState extends State<DashboardTab> {
                   label: 'Total Usuarios',
                   value: '${_stats['totalUsers'] ?? 0}',
                   color: AppTheme.primary,
-                  onTap: () => widget.onNavigate?.call(1),
+                  onTap: () =>
+                      widget.onNavigate?.call(1, filter: UserFilter.all),
                 ),
               ),
               const SizedBox(width: 12),
@@ -101,7 +104,8 @@ class _DashboardTabState extends State<DashboardTab> {
                   label: 'Disponibles',
                   value: '${_stats['available'] ?? 0}',
                   color: AppTheme.accent,
-                  onTap: () => widget.onNavigate?.call(1),
+                  onTap: () => widget.onNavigate
+                      ?.call(1, filter: UserFilter.available),
                 ),
               ),
               const SizedBox(width: 12),
@@ -111,7 +115,8 @@ class _DashboardTabState extends State<DashboardTab> {
                   label: 'Expirados',
                   value: '${_stats['expired'] ?? 0}',
                   color: AppTheme.warning,
-                  onTap: () => widget.onNavigate?.call(1),
+                  onTap: () => widget.onNavigate
+                      ?.call(1, filter: UserFilter.expired),
                 ),
               ),
             ],
@@ -131,7 +136,14 @@ class _DashboardTabState extends State<DashboardTab> {
               _QuickAction(
                 icon: Icons.person_add,
                 label: 'Ver Usuarios',
-                onTap: () => widget.onNavigate?.call(1),
+                onTap: () =>
+                    widget.onNavigate?.call(1, filter: UserFilter.all),
+              ),
+              _QuickAction(
+                icon: Icons.timer_off,
+                label: 'Expirados',
+                onTap: () =>
+                    widget.onNavigate?.call(1, filter: UserFilter.expired),
               ),
               _QuickAction(
                 icon: Icons.wifi,
