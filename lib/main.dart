@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'providers/router_provider.dart';
 import 'providers/auth_provider.dart';
+import 'providers/accounting_provider.dart';
 import 'screens/login_screen.dart';
 import 'utils/app_theme.dart';
 
@@ -30,6 +31,7 @@ class HTPoWiFiApp extends StatelessWidget {
       providers: [
         ChangeNotifierProvider(create: (_) => RouterProvider()),
         ChangeNotifierProvider(create: (_) => AuthProvider()),
+        ChangeNotifierProvider(create: (_) => AccountingProvider()),
       ],
       child: MaterialApp(
         title: 'HTPoWiFi',
