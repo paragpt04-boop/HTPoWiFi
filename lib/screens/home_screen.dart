@@ -84,6 +84,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     final prov = context.watch<RouterProvider>();
     final auth = context.watch<AuthProvider>();
     final isVendor = auth.isVendor;
+    final bool compact = MediaQuery.sizeOf(context).width < 420;
 
     // Vendor solo ve Tarjetas (index 3 del admin = index 0 del vendor)
     // Admin ve: Dashboard(0), Usuarios(1), Activos(2), Tarjetas(3), Contabilidad(4)
@@ -152,30 +153,37 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         ),
         actions: [
           // Connection chip
-          Container(
-            margin: const EdgeInsets.only(right: 4),
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-            decoration: BoxDecoration(
-              color: AppTheme.success.withOpacity(0.15),
-              borderRadius: BorderRadius.circular(20),
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Container(
-                  width: 8,
-                  height: 8,
-                  decoration: const BoxDecoration(
-                    color: AppTheme.success,
-                    shape: BoxShape.circle,
+          Tooltip(
+            message: prov.config?.host ?? '',
+            child: Container(
+              margin: const EdgeInsets.only(right: 4),
+              padding: EdgeInsets.symmetric(
+                  horizontal: compact ? 6 : 10, vertical: 4),
+              decoration: BoxDecoration(
+                color: AppTheme.success.withOpacity(0.15),
+                borderRadius: BorderRadius.circular(20),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    width: 8,
+                    height: 8,
+                    decoration: const BoxDecoration(
+                      color: AppTheme.success,
+                      shape: BoxShape.circle,
+                    ),
                   ),
-                ),
-                const SizedBox(width: 6),
-                Text(
-                  prov.config?.host ?? '',
-                  style: const TextStyle(color: AppTheme.success, fontSize: 12),
-                ),
-              ],
+                  if (!compact) ...[
+                    const SizedBox(width: 6),
+                    Text(
+                      prov.config?.host ?? '',
+                      style: const TextStyle(
+                          color: AppTheme.success, fontSize: 12),
+                    ),
+                  ],
+                ],
+              ),
             ),
           ),
           // Settings (solo Admin)
