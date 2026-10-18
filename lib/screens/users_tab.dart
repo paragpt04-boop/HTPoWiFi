@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import '../models/hotspot_user.dart';
 import '../providers/router_provider.dart';
+import '../providers/accounting_provider.dart';
 import '../services/mikrotik_api.dart';
 import '../utils/app_theme.dart';
 import '../utils/ros_time.dart';
@@ -14,7 +15,16 @@ enum _ExpiredSort { recent, oldest, name }
 
 /// Tiempos disponibles al crear o renovar usuarios.
 const List<String> kUserTimes = <String>[
-  '5m', '30m', '1h', '2h', '5h', '12h', '1d', '3d', '7d', '30d'
+  '5m',
+  '30m',
+  '1h',
+  '2h',
+  '5h',
+  '12h',
+  '1d',
+  '3d',
+  '7d',
+  '30d'
 ];
 
 String userTimeLabel(String code) {
@@ -48,6 +58,9 @@ class _UsersTabState extends State<UsersTab> {
   final TextEditingController _searchCtl = TextEditingController();
   late UserFilter _filter;
   _ExpiredSort _expSort = _ExpiredSort.recent;
+  final Set<String> _selectedIds = <String>{};
+  bool _selecting = false;
+  String? _expiredProfile;
 
   // Reloj del router (las marcas de expiración usan su hora)
   DateTime? _routerNow;
@@ -90,8 +103,8 @@ class _UsersTabState extends State<UsersTab> {
 
       // Solo se lee el log si hay expirados sin hora exacta registrada
       Map<String, DateTime> logTimes = <String, DateTime>{};
-      final bool needLog = users.any(
-          (HotspotUser u) => u.isExpired && _validStamp(u.trackedExpiry) == null);
+      final bool needLog = users.any((HotspotUser u) =>
+          u.isExpired && _validStamp(u.trackedExpiry) == null);
       if (needLog && clock != null) {
         logTimes = await api.getLastLogoutTimes(clock);
       }
@@ -99,6 +112,7 @@ class _UsersTabState extends State<UsersTab> {
       if (!mounted) return;
       setState(() {
         _users = users;
+        _selectedIds.clear();
         _routerNow = clock;
         _loadedAt = DateTime.now();
         _trackerInstalled = tracker;
@@ -120,9 +134,8 @@ class _UsersTabState extends State<UsersTab> {
   bool get _clockOk => _routerNow != null && _routerNow!.year >= 2020;
 
   /// Hora actual del router estimada (avanza con el reloj del teléfono).
-  DateTime? get _nowRouter => _clockOk
-      ? _routerNow!.add(DateTime.now().difference(_loadedAt))
-      : null;
+  DateTime? get _nowRouter =>
+      _clockOk ? _routerNow!.add(DateTime.now().difference(_loadedAt)) : null;
 
   ExpiryInfo _expiryOf(HotspotUser u) {
     if (!u.isExpired) return ExpiryInfo.none;
@@ -157,12 +170,30 @@ class _UsersTabState extends State<UsersTab> {
     }
   }
 
-  int _count(UserFilter f) => _users.where((HotspotUser u) => _matches(u, f)).length;
+  int _count(UserFilter f) =>
+      _users.where((HotspotUser u) => _matches(u, f)).length;
+
+  List<String> get _expiredProfiles {
+    final Map<String, String> names = <String, String>{
+      'default': 'default',
+      'premium': 'Premium',
+    };
+    for (final HotspotUser user
+        in _users.where((HotspotUser u) => u.isExpired)) {
+      names[user.profile.toLowerCase()] = user.profile;
+    }
+    return names.values.toList();
+  }
 
   List<HotspotUser> get _visible {
     final String q = _searchCtl.text.trim().toLowerCase();
     final List<HotspotUser> list = _users.where((HotspotUser u) {
       if (!_matches(u, _filter)) return false;
+      if (_filter == UserFilter.expired &&
+          _expiredProfile != null &&
+          u.profile.toLowerCase() != _expiredProfile!.toLowerCase()) {
+        return false;
+      }
       if (q.isEmpty) return true;
       return u.name.toLowerCase().contains(q) ||
           u.password.toLowerCase().contains(q) ||
@@ -187,10 +218,29 @@ class _UsersTabState extends State<UsersTab> {
   }
 
   // ─── Acciones ─────────────────────────────────────────────
+  Future<bool> _captureAccounting() async {
+    final RouterProvider router = context.read<RouterProvider>();
+    final config = router.config;
+    final MikroTikApi? api = router.api;
+    if (config == null || api == null) return false;
+    try {
+      final List<HotspotUser> current = await api.getUsers();
+      if (!mounted) return false;
+      await context.read<AccountingProvider>().observeUsers(config, current);
+      return true;
+    } catch (_) {
+      _showSnack('No se pudo guardar Contabilidad. Intenta de nuevo.',
+          isError: true);
+      return false;
+    }
+  }
+
   Future<void> _deleteUser(HotspotUser user) async {
     final bool? confirm = await _confirm(
         'Eliminar usuario', 'Eliminar "${user.name}"?', 'Eliminar');
-    if (confirm == true && user.id != null) {
+    if (confirm == true && mounted && user.id != null) {
+      final bool captured = await _captureAccounting();
+      if (!captured || !mounted) return;
       final MikroTikApi? api = context.read<RouterProvider>().api;
       if (api == null) return;
       try {
@@ -204,15 +254,16 @@ class _UsersTabState extends State<UsersTab> {
   }
 
   Future<void> _deleteAllExpired() async {
-    final List<HotspotUser> expired =
-        _users.where((HotspotUser u) => u.isExpired).toList();
+    final List<HotspotUser> expired = _visible;
     if (expired.isEmpty) return;
     final bool? confirm = await _confirm(
         'Eliminar expirados',
         'Se eliminarán ${expired.length} usuarios expirados del router.\n'
             'Esta acción no se puede deshacer.',
         'Eliminar ${expired.length}');
-    if (confirm != true) return;
+    if (confirm != true || !mounted) return;
+    final bool captured = await _captureAccounting();
+    if (!captured || !mounted) return;
     final MikroTikApi? api = context.read<RouterProvider>().api;
     if (api == null) return;
     setState(() => _loading = true);
@@ -225,8 +276,66 @@ class _UsersTabState extends State<UsersTab> {
     _load();
   }
 
+  void _toggleSelection(HotspotUser user) {
+    final String? id = user.id;
+    if (id == null) return;
+    setState(() {
+      if (!_selectedIds.add(id)) _selectedIds.remove(id);
+    });
+  }
+
+  void _clearSelection() => setState(() {
+        _selectedIds.clear();
+        _selecting = false;
+      });
+
+  Future<void> _deleteSelected() async {
+    final List<HotspotUser> selected = _users
+        .where((HotspotUser u) => u.id != null && _selectedIds.contains(u.id))
+        .toList();
+    if (selected.isEmpty) return;
+    final bool? confirm = await _confirm(
+      'Eliminar usuarios',
+      'Se eliminarán ${selected.length} usuarios seleccionados del router.\n'
+          'Esta acción no se puede deshacer.',
+      'Eliminar ${selected.length}',
+    );
+    if (confirm != true || !mounted) return;
+    final bool captured = await _captureAccounting();
+    if (!captured || !mounted) return;
+    final MikroTikApi? api = context.read<RouterProvider>().api;
+    if (api == null) return;
+    setState(() => _loading = true);
+    final String? err = await api.deleteUsers(selected);
+    if (!mounted) return;
+    _clearSelection();
+    _showSnack(err ?? '${selected.length} usuarios eliminados',
+        isError: err != null);
+    await _load();
+  }
+
+  Widget _selectableCard(HotspotUser user, Widget card) {
+    if (!_selecting || user.id == null) return card;
+    final bool checked = _selectedIds.contains(user.id);
+    return Row(children: <Widget>[
+      Checkbox(
+        value: checked,
+        activeColor: AppTheme.primary,
+        onChanged: (_) => _toggleSelection(user),
+      ),
+      Expanded(
+        child: InkWell(
+          onTap: () => _toggleSelection(user),
+          child: IgnorePointer(child: card),
+        ),
+      ),
+    ]);
+  }
+
   Future<void> _resetUptime(HotspotUser user) async {
     if (user.id == null) return;
+    final bool captured = await _captureAccounting();
+    if (!captured || !mounted) return;
     final MikroTikApi? api = context.read<RouterProvider>().api;
     if (api == null) return;
     try {
@@ -244,7 +353,8 @@ class _UsersTabState extends State<UsersTab> {
     if (api == null) return;
     try {
       await api.toggleUser(user.id!, !user.disabled);
-      _showSnack(user.disabled ? 'Usuario habilitado' : 'Usuario deshabilitado');
+      _showSnack(
+          user.disabled ? 'Usuario habilitado' : 'Usuario deshabilitado');
       _load();
     } on MikroTikException catch (e) {
       _showSnack(e.message, isError: true);
@@ -268,7 +378,8 @@ class _UsersTabState extends State<UsersTab> {
               const Text(
                   'Se pone el contador a cero, se asigna el nuevo tiempo '
                   'y el usuario queda habilitado con la misma contraseña.',
-                  style: TextStyle(color: AppTheme.textSecondary, fontSize: 13)),
+                  style:
+                      TextStyle(color: AppTheme.textSecondary, fontSize: 13)),
               const SizedBox(height: 14),
               DropdownButtonFormField<String>(
                 value: selected,
@@ -297,7 +408,9 @@ class _UsersTabState extends State<UsersTab> {
         ),
       ),
     );
-    if (time == null) return;
+    if (time == null || !mounted) return;
+    final bool captured = await _captureAccounting();
+    if (!captured || !mounted) return;
     final MikroTikApi? api = context.read<RouterProvider>().api;
     if (api == null) return;
     try {
@@ -346,7 +459,8 @@ class _UsersTabState extends State<UsersTab> {
               child: const Text('Cancelar')),
           TextButton(
               onPressed: () => Navigator.pop(ctx, true),
-              child: Text(action, style: const TextStyle(color: AppTheme.error))),
+              child:
+                  Text(action, style: const TextStyle(color: AppTheme.error))),
         ],
       ),
     );
@@ -456,12 +570,16 @@ class _UsersTabState extends State<UsersTab> {
             const SizedBox(height: 16),
             _detailRow('Usuario', u.name,
                 onCopy: () => _copy(u.name, 'Usuario')),
-            _detailRow('Contraseña', u.password.isEmpty ? '(vacía)' : u.password,
+            _detailRow(
+                'Contraseña', u.password.isEmpty ? '(vacía)' : u.password,
                 onCopy: u.password.isEmpty
                     ? null
                     : () => _copy(u.password, 'Contraseña')),
-            _detailRow('Tiempo comprado',
-                u.hasLimit ? RosTime.formatDuration(u.limitDuration) : 'Ilimitado'),
+            _detailRow(
+                'Tiempo comprado',
+                u.hasLimit
+                    ? RosTime.formatDuration(u.limitDuration)
+                    : 'Ilimitado'),
             _detailRow('Tiempo usado', RosTime.formatDuration(u.usedDuration)),
             if (!u.isExpired && u.hasLimit)
               _detailRow('Tiempo restante', u.remainingTime),
@@ -538,8 +656,8 @@ class _UsersTabState extends State<UsersTab> {
               borderRadius: BorderRadius.circular(6),
               child: const Padding(
                 padding: EdgeInsets.all(4),
-                child: Icon(Icons.copy_rounded,
-                    size: 16, color: AppTheme.primary),
+                child:
+                    Icon(Icons.copy_rounded, size: 16, color: AppTheme.primary),
               ),
             ),
         ],
@@ -616,13 +734,15 @@ class _UsersTabState extends State<UsersTab> {
                   style: const TextStyle(color: AppTheme.textPrimary),
                   decoration: const InputDecoration(
                     labelText: 'Tiempo límite',
-                    prefixIcon: Icon(Icons.timer, color: AppTheme.textSecondary),
+                    prefixIcon:
+                        Icon(Icons.timer, color: AppTheme.textSecondary),
                   ),
                   items: kUserTimes
                       .map((String t) => DropdownMenuItem<String>(
                           value: t, child: Text(userTimeLabel(t))))
                       .toList(),
-                  onChanged: (String? v) => setDlgState(() => selectedTime = v!),
+                  onChanged: (String? v) =>
+                      setDlgState(() => selectedTime = v!),
                 ),
                 const SizedBox(height: 12),
                 DropdownButtonFormField<String>(
@@ -651,7 +771,8 @@ class _UsersTabState extends State<UsersTab> {
                   style: const TextStyle(color: AppTheme.textPrimary),
                   decoration: const InputDecoration(
                     labelText: 'Perfil',
-                    prefixIcon: Icon(Icons.speed, color: AppTheme.textSecondary),
+                    prefixIcon:
+                        Icon(Icons.speed, color: AppTheme.textSecondary),
                   ),
                   items: prov.profiles
                       .map((String pf) =>
@@ -710,7 +831,7 @@ class _UsersTabState extends State<UsersTab> {
 
     return Scaffold(
       backgroundColor: Colors.transparent,
-      floatingActionButton: expiredMode
+      floatingActionButton: expiredMode || _selecting
           ? null
           : FloatingActionButton(
               onPressed: _showAddDialog,
@@ -734,11 +855,11 @@ class _UsersTabState extends State<UsersTab> {
                             color: AppTheme.textSecondary),
                         onPressed: () {
                           _searchCtl.clear();
-                          setState(() {});
+                          setState(_selectedIds.clear);
                         })
                     : null,
               ),
-              onChanged: (_) => setState(() {}),
+              onChanged: (_) => setState(_selectedIds.clear),
             ),
           ),
           // Filtros
@@ -749,13 +870,66 @@ class _UsersTabState extends State<UsersTab> {
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
               children: <Widget>[
                 _filterChip(UserFilter.all, 'Todos', AppTheme.primary),
-                _filterChip(UserFilter.available, 'Disponibles', AppTheme.success),
+                _filterChip(
+                    UserFilter.available, 'Disponibles', AppTheme.success),
                 _filterChip(UserFilter.unused, 'Sin usar', AppTheme.accent),
                 _filterChip(UserFilter.expired, 'Expirados', AppTheme.warning),
-                _filterChip(UserFilter.disabled, 'Deshabilitados', AppTheme.error),
+                _filterChip(
+                    UserFilter.disabled, 'Deshabilitados', AppTheme.error),
               ],
             ),
           ),
+          if (expiredMode)
+            SizedBox(
+              height: 44,
+              child: ListView(
+                scrollDirection: Axis.horizontal,
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                children: <Widget>[
+                  _profileChip(null, 'Todos'),
+                  ..._expiredProfiles.map(
+                    (String profile) => _profileChip(profile, profile),
+                  ),
+                ],
+              ),
+            ),
+          if (_selecting)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              child: Wrap(
+                spacing: 6,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: <Widget>[
+                  Text('${_selectedIds.length} seleccionados',
+                      style: const TextStyle(color: AppTheme.textPrimary)),
+                  TextButton(
+                    onPressed: () => setState(() {
+                      _selectedIds.addAll(visible
+                          .map((HotspotUser u) => u.id)
+                          .whereType<String>());
+                    }),
+                    child: const Text('Seleccionar todo'),
+                  ),
+                  TextButton(
+                    onPressed: _selectedIds.isEmpty
+                        ? null
+                        : () => setState(_selectedIds.clear),
+                    child: const Text('Deseleccionar'),
+                  ),
+                  TextButton.icon(
+                    onPressed: _selectedIds.isEmpty ? null : _deleteSelected,
+                    icon: const Icon(Icons.delete_outline, size: 18),
+                    label: const Text('Eliminar'),
+                  ),
+                  IconButton(
+                    tooltip: 'Cancelar selección',
+                    onPressed: _clearSelection,
+                    icon: const Icon(Icons.close),
+                  ),
+                ],
+              ),
+            ),
           // Contador + acciones
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 0, 4, 0),
@@ -765,7 +939,7 @@ class _UsersTabState extends State<UsersTab> {
                     style: const TextStyle(
                         color: AppTheme.textSecondary, fontSize: 13)),
                 const Spacer(),
-                if (expiredMode) ...<Widget>[
+                if (expiredMode && !_selecting) ...<Widget>[
                   PopupMenuButton<_ExpiredSort>(
                     tooltip: 'Ordenar',
                     color: AppTheme.card,
@@ -779,15 +953,23 @@ class _UsersTabState extends State<UsersTab> {
                       _sortItem(_ExpiredSort.name, 'Nombre'),
                     ],
                   ),
-                  if (_count(UserFilter.expired) > 0)
+                  if (visible.isNotEmpty)
                     TextButton.icon(
                       onPressed: _deleteAllExpired,
                       icon: const Icon(Icons.delete_sweep,
                           color: AppTheme.error, size: 18),
-                      label: const Text('Borrar todos',
-                          style: TextStyle(color: AppTheme.error, fontSize: 12)),
+                      label: const Text('Borrar visibles',
+                          style:
+                              TextStyle(color: AppTheme.error, fontSize: 12)),
                     ),
                 ],
+                if (!_selecting)
+                  IconButton(
+                    tooltip: 'Seleccionar usuarios',
+                    icon: const Icon(Icons.checklist_rounded,
+                        color: AppTheme.textSecondary, size: 20),
+                    onPressed: () => setState(() => _selecting = true),
+                  ),
                 IconButton(
                   icon: const Icon(Icons.refresh,
                       color: AppTheme.textSecondary, size: 20),
@@ -810,28 +992,30 @@ class _UsersTabState extends State<UsersTab> {
                       children: <Widget>[
                         if (expiredMode) ..._expiredHeader(),
                         if (visible.isEmpty) _emptyState(),
-                        ...visible.map((HotspotUser u) => expiredMode
-                            ? _ExpiredUserCard(
-                                user: u,
-                                expiry: _expiryOf(u),
-                                expiredFor: _expiredFor(u),
-                                onTap: () => _showDetails(u),
-                                onRenew: () => _renewUser(u),
-                                onDelete: () => _deleteUser(u),
-                                onCopy: () => _copy(
-                                    'Usuario: ${u.name}\nContraseña: ${u.password}',
-                                    'Credenciales'),
-                              )
-                            : _UserCard(
-                                user: u,
-                                status: _statusOf(u),
-                                expiredFor: _expiredFor(u),
-                                onTap: () => _showDetails(u),
-                                onDelete: () => _deleteUser(u),
-                                onReset: () => _resetUptime(u),
-                                onToggle: () => _toggleUser(u),
-                                onRenew: () => _renewUser(u),
-                              )),
+                        ...visible.map((HotspotUser u) => _selectableCard(
+                            u,
+                            expiredMode
+                                ? _ExpiredUserCard(
+                                    user: u,
+                                    expiry: _expiryOf(u),
+                                    expiredFor: _expiredFor(u),
+                                    onTap: () => _showDetails(u),
+                                    onRenew: () => _renewUser(u),
+                                    onDelete: () => _deleteUser(u),
+                                    onCopy: () => _copy(
+                                        'Usuario: ${u.name}\nContraseña: ${u.password}',
+                                        'Credenciales'),
+                                  )
+                                : _UserCard(
+                                    user: u,
+                                    status: _statusOf(u),
+                                    expiredFor: _expiredFor(u),
+                                    onTap: () => _showDetails(u),
+                                    onDelete: () => _deleteUser(u),
+                                    onReset: () => _resetUptime(u),
+                                    onToggle: () => _toggleUser(u),
+                                    onRenew: () => _renewUser(u),
+                                  ))),
                       ],
                     ),
                   ),
@@ -842,8 +1026,7 @@ class _UsersTabState extends State<UsersTab> {
   }
 
   List<Widget> _expiredHeader() {
-    final List<HotspotUser> expired =
-        _users.where((HotspotUser u) => u.isExpired).toList();
+    final List<HotspotUser> expired = _visible;
     final int total =
         expired.fold<int>(0, (int s, HotspotUser u) => s + u.totalBytes);
     final Duration timeSold = expired.fold<Duration>(
@@ -981,7 +1164,10 @@ class _UsersTabState extends State<UsersTab> {
       child: ChoiceChip(
         selected: selected,
         showCheckmark: false,
-        onSelected: (_) => setState(() => _filter = f),
+        onSelected: (_) => setState(() {
+          _filter = f;
+          _selectedIds.clear();
+        }),
         backgroundColor: AppTheme.card,
         selectedColor: color.withOpacity(0.2),
         side: BorderSide(color: selected ? color : AppTheme.divider),
@@ -990,6 +1176,35 @@ class _UsersTabState extends State<UsersTab> {
                 color: selected ? color : AppTheme.textSecondary,
                 fontSize: 12,
                 fontWeight: selected ? FontWeight.w700 : FontWeight.normal)),
+      ),
+    );
+  }
+
+  Widget _profileChip(String? profile, String label) {
+    final bool selected = _expiredProfile == profile;
+    final int count = _users
+        .where((HotspotUser user) =>
+            user.isExpired &&
+            (profile == null ||
+                user.profile.toLowerCase() == profile.toLowerCase()))
+        .length;
+    return Padding(
+      padding: const EdgeInsets.only(right: 8),
+      child: ChoiceChip(
+        selected: selected,
+        showCheckmark: false,
+        onSelected: (_) => setState(() {
+          _expiredProfile = profile;
+          _selectedIds.clear();
+        }),
+        backgroundColor: AppTheme.card,
+        selectedColor: AppTheme.warning.withOpacity(0.2),
+        side: BorderSide(color: selected ? AppTheme.warning : AppTheme.divider),
+        label: Text('$label  $count',
+            style: TextStyle(
+              color: selected ? AppTheme.warning : AppTheme.textSecondary,
+              fontSize: 12,
+            )),
       ),
     );
   }
@@ -1062,132 +1277,137 @@ class _ExpiredUserCard extends StatelessWidget {
     return Padding(
       padding: const EdgeInsets.only(bottom: 10),
       child: Material(
-      color: AppTheme.card,
-      borderRadius: BorderRadius.circular(12),
-      child: InkWell(
-        onTap: onTap,
+        color: AppTheme.card,
         borderRadius: BorderRadius.circular(12),
-        child: Container(
-          padding: const EdgeInsets.all(14),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(color: AppTheme.warning.withOpacity(0.25)),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: <Widget>[
-              Row(
-                children: <Widget>[
-                  Container(
-                    width: 42,
-                    height: 42,
-                    decoration: BoxDecoration(
-                      color: AppTheme.warning.withOpacity(0.15),
-                      borderRadius: BorderRadius.circular(10),
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(12),
+          child: Container(
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: AppTheme.warning.withOpacity(0.25)),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                Row(
+                  children: <Widget>[
+                    Container(
+                      width: 42,
+                      height: 42,
+                      decoration: BoxDecoration(
+                        color: AppTheme.warning.withOpacity(0.15),
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: const Icon(Icons.timer_off,
+                          color: AppTheme.warning, size: 22),
                     ),
-                    child: const Icon(Icons.timer_off,
-                        color: AppTheme.warning, size: 22),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: <Widget>[
-                        Text(user.name,
-                            style: const TextStyle(
-                                color: AppTheme.textPrimary,
-                                fontWeight: FontWeight.w700,
-                                fontSize: 15)),
-                        const SizedBox(height: 2),
-                        Row(
-                          children: <Widget>[
-                            const Icon(Icons.vpn_key,
-                                color: AppTheme.accent, size: 12),
-                            const SizedBox(width: 4),
-                            Text(user.password.isEmpty ? '(sin contraseña)' : user.password,
-                                style: const TextStyle(
-                                    color: AppTheme.accent,
-                                    fontSize: 12,
-                                    fontWeight: FontWeight.w600,
-                                    letterSpacing: 0.5)),
-                          ],
-                        ),
-                      ],
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: <Widget>[
+                          Text(user.name,
+                              style: const TextStyle(
+                                  color: AppTheme.textPrimary,
+                                  fontWeight: FontWeight.w700,
+                                  fontSize: 15)),
+                          const SizedBox(height: 2),
+                          Row(
+                            children: <Widget>[
+                              const Icon(Icons.vpn_key,
+                                  color: AppTheme.accent, size: 12),
+                              const SizedBox(width: 4),
+                              Text(
+                                  user.password.isEmpty
+                                      ? '(sin contraseña)'
+                                      : user.password,
+                                  style: const TextStyle(
+                                      color: AppTheme.accent,
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.w600,
+                                      letterSpacing: 0.5)),
+                            ],
+                          ),
+                        ],
+                      ),
                     ),
-                  ),
-                  // Tiempo expirado
-                  Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                    decoration: BoxDecoration(
-                      color: AppTheme.warning.withOpacity(0.15),
-                      borderRadius: BorderRadius.circular(8),
+                    // Tiempo expirado
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 10, vertical: 6),
+                      decoration: BoxDecoration(
+                        color: AppTheme.warning.withOpacity(0.15),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.end,
+                        children: <Widget>[
+                          const Text('expirado hace',
+                              style: TextStyle(
+                                  color: AppTheme.textSecondary, fontSize: 9)),
+                          Text(
+                              expiredFor != null
+                                  ? RosTime.formatAgo(expiredFor!)
+                                  : '—',
+                              style: const TextStyle(
+                                  color: AppTheme.warning,
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w800)),
+                        ],
+                      ),
                     ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.end,
-                      children: <Widget>[
-                        const Text('expirado hace',
-                            style: TextStyle(
-                                color: AppTheme.textSecondary, fontSize: 9)),
-                        Text(
-                            expiredFor != null
-                                ? RosTime.formatAgo(expiredFor!)
-                                : '—',
-                            style: const TextStyle(
-                                color: AppTheme.warning,
-                                fontSize: 14,
-                                fontWeight: FontWeight.w800)),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 10),
-              Row(
-                children: <Widget>[
-                  const Icon(Icons.event_busy,
-                      color: AppTheme.textSecondary, size: 13),
-                  const SizedBox(width: 5),
-                  Text('Expiró: $when',
-                      style: const TextStyle(
-                          color: AppTheme.textPrimary, fontSize: 12)),
-                  if (source.isNotEmpty) ...<Widget>[
-                    const SizedBox(width: 6),
-                    Text('($source)',
-                        style: const TextStyle(
-                            color: AppTheme.textSecondary, fontSize: 11)),
                   ],
-                ],
-              ),
-              const SizedBox(height: 8),
-              Wrap(
-                spacing: 6,
-                runSpacing: 6,
-                children: <Widget>[
-                  _chip(Icons.timer, 'Plan ${RosTime.formatDuration(user.limitDuration)}'),
-                  _chip(Icons.hourglass_bottom,
-                      'Usó ${RosTime.formatDuration(user.usedDuration)}'),
-                  _chip(Icons.download, RosTime.formatBytes(user.bytesOut)),
-                  _chip(Icons.upload, RosTime.formatBytes(user.bytesIn)),
-                  _chip(Icons.speed, user.profile),
-                  if (user.disabled) _chip(Icons.block, 'Deshabilitado'),
-                ],
-              ),
-              const SizedBox(height: 6),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.end,
-                children: <Widget>[
-                  _action(Icons.copy_rounded, 'Copiar', AppTheme.textSecondary,
-                      onCopy),
-                  _action(Icons.autorenew, 'Renovar', AppTheme.primary, onRenew),
-                  _action(
-                      Icons.delete_outline, 'Eliminar', AppTheme.error, onDelete),
-                ],
-              ),
-            ],
+                ),
+                const SizedBox(height: 10),
+                Row(
+                  children: <Widget>[
+                    const Icon(Icons.event_busy,
+                        color: AppTheme.textSecondary, size: 13),
+                    const SizedBox(width: 5),
+                    Text('Expiró: $when',
+                        style: const TextStyle(
+                            color: AppTheme.textPrimary, fontSize: 12)),
+                    if (source.isNotEmpty) ...<Widget>[
+                      const SizedBox(width: 6),
+                      Text('($source)',
+                          style: const TextStyle(
+                              color: AppTheme.textSecondary, fontSize: 11)),
+                    ],
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 6,
+                  runSpacing: 6,
+                  children: <Widget>[
+                    _chip(Icons.timer,
+                        'Plan ${RosTime.formatDuration(user.limitDuration)}'),
+                    _chip(Icons.hourglass_bottom,
+                        'Usó ${RosTime.formatDuration(user.usedDuration)}'),
+                    _chip(Icons.download, RosTime.formatBytes(user.bytesOut)),
+                    _chip(Icons.upload, RosTime.formatBytes(user.bytesIn)),
+                    _chip(Icons.speed, user.profile),
+                    if (user.disabled) _chip(Icons.block, 'Deshabilitado'),
+                  ],
+                ),
+                const SizedBox(height: 6),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.end,
+                  children: <Widget>[
+                    _action(Icons.copy_rounded, 'Copiar',
+                        AppTheme.textSecondary, onCopy),
+                    _action(
+                        Icons.autorenew, 'Renovar', AppTheme.primary, onRenew),
+                    _action(Icons.delete_outline, 'Eliminar', AppTheme.error,
+                        onDelete),
+                  ],
+                ),
+              ],
+            ),
           ),
         ),
-      ),
       ),
     );
   }
@@ -1258,174 +1478,178 @@ class _UserCard extends StatelessWidget {
     return Padding(
       padding: const EdgeInsets.only(bottom: 10),
       child: Material(
-      color: AppTheme.card,
-      borderRadius: BorderRadius.circular(12),
-      child: InkWell(
-        onTap: onTap,
+        color: AppTheme.card,
         borderRadius: BorderRadius.circular(12),
-        child: Container(
-          padding: const EdgeInsets.all(14),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(color: AppTheme.divider, width: 0.5),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: <Widget>[
-              Row(
-                children: <Widget>[
-                  Container(
-                    width: 40,
-                    height: 40,
-                    decoration: BoxDecoration(
-                      color: statusColor.withOpacity(0.15),
-                      borderRadius: BorderRadius.circular(10),
-                    ),
-                    child: Icon(status.icon, color: statusColor, size: 22),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: <Widget>[
-                        Row(
-                          children: <Widget>[
-                            Flexible(
-                              child: Text(user.name,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: const TextStyle(
-                                      color: AppTheme.textPrimary,
-                                      fontWeight: FontWeight.w600,
-                                      fontSize: 15)),
-                            ),
-                            const SizedBox(width: 8),
-                            const Icon(Icons.vpn_key,
-                                color: AppTheme.accent, size: 11),
-                            const SizedBox(width: 3),
-                            Text(user.password,
-                                style: const TextStyle(
-                                    color: AppTheme.accent, fontSize: 12)),
-                          ],
-                        ),
-                        const SizedBox(height: 2),
-                        Row(
-                          children: <Widget>[
-                            Container(
-                              width: 6,
-                              height: 6,
-                              decoration: BoxDecoration(
-                                color: statusColor,
-                                shape: BoxShape.circle,
-                              ),
-                            ),
-                            const SizedBox(width: 4),
-                            Text(statusText,
-                                style: TextStyle(
-                                    color: statusColor, fontSize: 12)),
-                          ],
-                        ),
-                      ],
-                    ),
-                  ),
-                  PopupMenuButton<String>(
-                    color: AppTheme.cardLight,
-                    icon: const Icon(Icons.more_vert,
-                        color: AppTheme.textSecondary, size: 20),
-                    onSelected: (String v) {
-                      switch (v) {
-                        case 'renew':
-                          onRenew();
-                          break;
-                        case 'reset':
-                          onReset();
-                          break;
-                        case 'toggle':
-                          onToggle();
-                          break;
-                        case 'delete':
-                          onDelete();
-                          break;
-                      }
-                    },
-                    itemBuilder: (_) => <PopupMenuEntry<String>>[
-                      if (user.isExpired)
-                        const PopupMenuItem<String>(
-                            value: 'renew',
-                            child: Row(children: <Widget>[
-                              Icon(Icons.autorenew,
-                                  color: AppTheme.primary, size: 18),
-                              SizedBox(width: 8),
-                              Text('Renovar',
-                                  style:
-                                      TextStyle(color: AppTheme.textPrimary))
-                            ])),
-                      const PopupMenuItem<String>(
-                          value: 'reset',
-                          child: Row(children: <Widget>[
-                            Icon(Icons.restore,
-                                color: AppTheme.primary, size: 18),
-                            SizedBox(width: 8),
-                            Text('Reiniciar tiempo',
-                                style: TextStyle(color: AppTheme.textPrimary))
-                          ])),
-                      PopupMenuItem<String>(
-                          value: 'toggle',
-                          child: Row(children: <Widget>[
-                            Icon(user.disabled ? Icons.play_arrow : Icons.pause,
-                                color: AppTheme.warning, size: 18),
-                            const SizedBox(width: 8),
-                            Text(user.disabled ? 'Habilitar' : 'Deshabilitar',
-                                style: const TextStyle(
-                                    color: AppTheme.textPrimary))
-                          ])),
-                      const PopupMenuItem<String>(
-                          value: 'delete',
-                          child: Row(children: <Widget>[
-                            Icon(Icons.delete, color: AppTheme.error, size: 18),
-                            SizedBox(width: 8),
-                            Text('Eliminar',
-                                style: TextStyle(color: AppTheme.error))
-                          ])),
-                    ],
-                  ),
-                ],
-              ),
-              if (user.hasLimit) ...<Widget>[
-                const SizedBox(height: 10),
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(12),
+          child: Container(
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: AppTheme.divider, width: 0.5),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
                 Row(
                   children: <Widget>[
-                    const Icon(Icons.timer,
-                        color: AppTheme.textSecondary, size: 14),
-                    const SizedBox(width: 6),
-                    Text('Restante: ${user.remainingTime}',
-                        style: const TextStyle(
-                            color: AppTheme.textSecondary, fontSize: 12)),
-                    const Spacer(),
-                    Text('Límite: ${user.limitUptime}',
-                        style: const TextStyle(
-                            color: AppTheme.textSecondary, fontSize: 12)),
+                    Container(
+                      width: 40,
+                      height: 40,
+                      decoration: BoxDecoration(
+                        color: statusColor.withOpacity(0.15),
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: Icon(status.icon, color: statusColor, size: 22),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: <Widget>[
+                          Row(
+                            children: <Widget>[
+                              Flexible(
+                                child: Text(user.name,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: const TextStyle(
+                                        color: AppTheme.textPrimary,
+                                        fontWeight: FontWeight.w600,
+                                        fontSize: 15)),
+                              ),
+                              const SizedBox(width: 8),
+                              const Icon(Icons.vpn_key,
+                                  color: AppTheme.accent, size: 11),
+                              const SizedBox(width: 3),
+                              Text(user.password,
+                                  style: const TextStyle(
+                                      color: AppTheme.accent, fontSize: 12)),
+                            ],
+                          ),
+                          const SizedBox(height: 2),
+                          Row(
+                            children: <Widget>[
+                              Container(
+                                width: 6,
+                                height: 6,
+                                decoration: BoxDecoration(
+                                  color: statusColor,
+                                  shape: BoxShape.circle,
+                                ),
+                              ),
+                              const SizedBox(width: 4),
+                              Text(statusText,
+                                  style: TextStyle(
+                                      color: statusColor, fontSize: 12)),
+                            ],
+                          ),
+                        ],
+                      ),
+                    ),
+                    PopupMenuButton<String>(
+                      color: AppTheme.cardLight,
+                      icon: const Icon(Icons.more_vert,
+                          color: AppTheme.textSecondary, size: 20),
+                      onSelected: (String v) {
+                        switch (v) {
+                          case 'renew':
+                            onRenew();
+                            break;
+                          case 'reset':
+                            onReset();
+                            break;
+                          case 'toggle':
+                            onToggle();
+                            break;
+                          case 'delete':
+                            onDelete();
+                            break;
+                        }
+                      },
+                      itemBuilder: (_) => <PopupMenuEntry<String>>[
+                        if (user.isExpired)
+                          const PopupMenuItem<String>(
+                              value: 'renew',
+                              child: Row(children: <Widget>[
+                                Icon(Icons.autorenew,
+                                    color: AppTheme.primary, size: 18),
+                                SizedBox(width: 8),
+                                Text('Renovar',
+                                    style:
+                                        TextStyle(color: AppTheme.textPrimary))
+                              ])),
+                        const PopupMenuItem<String>(
+                            value: 'reset',
+                            child: Row(children: <Widget>[
+                              Icon(Icons.restore,
+                                  color: AppTheme.primary, size: 18),
+                              SizedBox(width: 8),
+                              Text('Reiniciar tiempo',
+                                  style: TextStyle(color: AppTheme.textPrimary))
+                            ])),
+                        PopupMenuItem<String>(
+                            value: 'toggle',
+                            child: Row(children: <Widget>[
+                              Icon(
+                                  user.disabled
+                                      ? Icons.play_arrow
+                                      : Icons.pause,
+                                  color: AppTheme.warning,
+                                  size: 18),
+                              const SizedBox(width: 8),
+                              Text(user.disabled ? 'Habilitar' : 'Deshabilitar',
+                                  style: const TextStyle(
+                                      color: AppTheme.textPrimary))
+                            ])),
+                        const PopupMenuItem<String>(
+                            value: 'delete',
+                            child: Row(children: <Widget>[
+                              Icon(Icons.delete,
+                                  color: AppTheme.error, size: 18),
+                              SizedBox(width: 8),
+                              Text('Eliminar',
+                                  style: TextStyle(color: AppTheme.error))
+                            ])),
+                      ],
+                    ),
                   ],
                 ),
-                const SizedBox(height: 6),
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(4),
-                  child: LinearProgressIndicator(
-                    value: user.usagePercent,
-                    minHeight: 5,
-                    backgroundColor: AppTheme.divider,
-                    valueColor: AlwaysStoppedAnimation<Color>(
-                        user.isExpired
-                            ? AppTheme.warning
-                            : (user.usagePercent > 0.8
-                                ? AppTheme.error
-                                : AppTheme.primary)),
+                if (user.hasLimit) ...<Widget>[
+                  const SizedBox(height: 10),
+                  Row(
+                    children: <Widget>[
+                      const Icon(Icons.timer,
+                          color: AppTheme.textSecondary, size: 14),
+                      const SizedBox(width: 6),
+                      Text('Restante: ${user.remainingTime}',
+                          style: const TextStyle(
+                              color: AppTheme.textSecondary, fontSize: 12)),
+                      const Spacer(),
+                      Text('Límite: ${user.limitUptime}',
+                          style: const TextStyle(
+                              color: AppTheme.textSecondary, fontSize: 12)),
+                    ],
                   ),
-                ),
+                  const SizedBox(height: 6),
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(4),
+                    child: LinearProgressIndicator(
+                      value: user.usagePercent,
+                      minHeight: 5,
+                      backgroundColor: AppTheme.divider,
+                      valueColor: AlwaysStoppedAnimation<Color>(user.isExpired
+                          ? AppTheme.warning
+                          : (user.usagePercent > 0.8
+                              ? AppTheme.error
+                              : AppTheme.primary)),
+                    ),
+                  ),
+                ],
               ],
-            ],
+            ),
           ),
         ),
-      ),
       ),
     );
   }
