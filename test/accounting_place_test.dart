@@ -27,7 +27,7 @@ void main() {
     for (final String card in <String>[
       'wifiC12345',
       'wifiC1234567',
-      'wifiC212345',
+      'wifiC21234',
       'wifiC21234567',
       'premiumC2123456',
       'otro123456',
