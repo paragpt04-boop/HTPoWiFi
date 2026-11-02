@@ -3,6 +3,7 @@ import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 
 import '../models/accounting_entry.dart';
+import '../models/accounting_place.dart';
 import '../providers/accounting_provider.dart';
 import '../providers/router_provider.dart';
 import '../services/mikrotik_api.dart';
@@ -20,6 +21,7 @@ class AccountingTab extends StatefulWidget {
 class _AccountingTabState extends State<AccountingTab> {
   int _days = 1;
   int _periodOffset = 0;
+  AccountingPlace _place = AccountingPlace.all;
   bool _busy = false;
   bool? _trackerInstalled;
 
@@ -323,20 +325,29 @@ class _AccountingTabState extends State<AccountingTab> {
         first.year, first.month, first.day + _days, first.hour, first.minute);
     final DateTime visibleEnd = periodEnd.isAfter(now) ? now : periodEnd;
     final List<AccountingEntry> all = accounting.entriesFor(routerKey);
+    final List<AccountingEntry> selected = _place == AccountingPlace.all
+        ? all
+        : all
+            .where((AccountingEntry e) => placeForCard(e.userName) == _place)
+            .toList();
     final List<_AccountingDay> days = <_AccountingDay>[];
     for (int i = 0; i < _days; i++) {
       final DateTime start = DateTime(
           first.year, first.month, first.day + i, first.hour, first.minute);
       final DateTime end = DateTime(
           start.year, start.month, start.day + 1, start.hour, start.minute);
-      final List<AccountingEntry> entries = all
+      final List<AccountingEntry> entries = selected
           .where((AccountingEntry e) =>
               !e.firstUsedAt.isBefore(start) &&
               e.firstUsedAt.isBefore(end) &&
               e.firstUsedAt.isBefore(visibleEnd))
           .toList();
       days.add(_AccountingDay(
-          start, entries, accounting.overridesFor(routerKey, start)));
+          start,
+          entries,
+          _place == AccountingPlace.all
+              ? accounting.overridesFor(routerKey, start)
+              : const AccountingOverrides()));
     }
     final double money =
         days.fold<double>(0, (double sum, _AccountingDay d) => sum + d.money);
@@ -382,6 +393,31 @@ class _AccountingTabState extends State<AccountingTab> {
             Text(accounting.loadError!,
                 style: const TextStyle(color: AppTheme.error)),
           if (_trackerInstalled == false) _trackerBanner(),
+          const SizedBox(height: 10),
+          DropdownButtonFormField<AccountingPlace>(
+            value: _place,
+            decoration: const InputDecoration(
+              labelText: 'Lugar',
+              prefixIcon: Icon(Icons.place_outlined),
+              border: OutlineInputBorder(),
+            ),
+            items: AccountingPlace.values
+                .map((AccountingPlace place) => DropdownMenuItem(
+                    value: place, child: Text(place.label)))
+                .toList(),
+            onChanged: (AccountingPlace? place) {
+              if (place != null) setState(() => _place = place);
+            },
+          ),
+          if (_place != AccountingPlace.all)
+            const Padding(
+              padding: EdgeInsets.only(top: 6),
+              child: Text(
+                'Los ajustes manuales de totales diarios se muestran en Todos. '
+                'Aquí se calculan solo las tarjetas de este lugar.',
+                style: TextStyle(color: AppTheme.textSecondary, fontSize: 12),
+              ),
+            ),
           const SizedBox(height: 10),
           SingleChildScrollView(
             scrollDirection: Axis.horizontal,
@@ -512,11 +548,13 @@ class _AccountingTabState extends State<AccountingTab> {
             '${_hours(day.hours)} horas${adjusted ? ' · ajustado' : ''}',
             style:
                 const TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
-        trailing: IconButton(
-          tooltip: 'Corregir totales',
-          icon: const Icon(Icons.edit_outlined, size: 18),
-          onPressed: () => _editDay(router, day),
-        ),
+        trailing: _place == AccountingPlace.all
+            ? IconButton(
+                tooltip: 'Corregir totales',
+                icon: const Icon(Icons.edit_outlined, size: 18),
+                onPressed: () => _editDay(router, day),
+              )
+            : null,
         children: <Widget>[
           if (day.entries.isEmpty)
             const Padding(
