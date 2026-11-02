@@ -26,6 +26,7 @@ class HotspotUser {
   /// Formato: "[EXP:2026-10-01 14:32:05]" o "[EXP:?]" (hora desconocida).
   static const String expTagStart = '[EXP:';
   static final RegExp _expTagRe = RegExp(r'\s*\[EXP:([^\]]*)\]');
+  static final RegExp _firstTagRe = RegExp(r'\s*\[ACC:([^\]]*)\]');
 
   final String? id;
   final String name;
@@ -97,6 +98,18 @@ class HotspotUser {
 
   bool get hasExpTag => expTagValue != null;
 
+  String? get firstTagValue => _firstTagRe.firstMatch(comment ?? '')?.group(1);
+
+  bool get hasFirstTag => firstTagValue != null;
+
+  DateTime? get trackedFirstUse {
+    final String? value = firstTagValue;
+    if (value == null || value.trim() == '?' || value.trim().isEmpty) {
+      return null;
+    }
+    return RosTime.parseStamp(value);
+  }
+
   /// Fecha guardada por el router, si es válida.
   DateTime? get trackedExpiry {
     final String? v = expTagValue;
@@ -105,13 +118,24 @@ class HotspotUser {
   }
 
   /// Comentario sin la etiqueta de expiración.
-  String get cleanComment => (comment ?? '').replaceAll(_expTagRe, '').trim();
+  String get cleanComment => (comment ?? '')
+      .replaceAll(_expTagRe, '')
+      .replaceAll(_firstTagRe, '')
+      .trim();
 
   /// Comentario con la etiqueta indicada (reemplaza cualquier otra).
   String commentWithTag(String value) {
     final String base = cleanComment;
+    final String first = hasFirstTag ? ' [ACC:$firstTagValue]' : '';
     final String tag = '$expTagStart$value]';
-    return base.isEmpty ? tag : '$base $tag';
+    return base.isEmpty ? '$tag$first' : '$base $tag$first';
+  }
+
+  String commentWithFirstTag(String value) {
+    final String base = cleanComment;
+    final String exp = hasExpTag ? ' [EXP:$expTagValue]' : '';
+    final String first = '[ACC:$value]';
+    return base.isEmpty ? '$first$exp' : '$base $first$exp';
   }
 
   factory HotspotUser.fromJson(Map<String, dynamic> json) => HotspotUser(

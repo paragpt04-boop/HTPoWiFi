@@ -7,7 +7,7 @@ import 'users_tab.dart' show UserFilter;
 
 class DashboardTab extends StatefulWidget {
   /// Callback para navegar a otra pestaña del HomeScreen.
-  /// índices: 0=Dashboard, 1=Usuarios, 2=Activos, 3=Tarjetas.
+  /// índices: 0=Dashboard, 1=Usuarios, 2=Activos, 3=Tarjetas, 4=Contabilidad.
   /// [filter] abre Usuarios con ese filtro ya aplicado.
   final void Function(int index, {UserFilter? filter})? onNavigate;
 
@@ -104,8 +104,8 @@ class _DashboardTabState extends State<DashboardTab> {
                   label: 'Disponibles',
                   value: '${_stats['available'] ?? 0}',
                   color: AppTheme.accent,
-                  onTap: () => widget.onNavigate
-                      ?.call(1, filter: UserFilter.available),
+                  onTap: () =>
+                      widget.onNavigate?.call(1, filter: UserFilter.available),
                 ),
               ),
               const SizedBox(width: 12),
@@ -115,8 +115,8 @@ class _DashboardTabState extends State<DashboardTab> {
                   label: 'Expirados',
                   value: '${_stats['expired'] ?? 0}',
                   color: AppTheme.warning,
-                  onTap: () => widget.onNavigate
-                      ?.call(1, filter: UserFilter.expired),
+                  onTap: () =>
+                      widget.onNavigate?.call(1, filter: UserFilter.expired),
                 ),
               ),
             ],
@@ -136,8 +136,7 @@ class _DashboardTabState extends State<DashboardTab> {
               _QuickAction(
                 icon: Icons.person_add,
                 label: 'Ver Usuarios',
-                onTap: () =>
-                    widget.onNavigate?.call(1, filter: UserFilter.all),
+                onTap: () => widget.onNavigate?.call(1, filter: UserFilter.all),
               ),
               _QuickAction(
                 icon: Icons.timer_off,
@@ -154,6 +153,11 @@ class _DashboardTabState extends State<DashboardTab> {
                 icon: Icons.card_membership,
                 label: 'Tarjetas',
                 onTap: () => widget.onNavigate?.call(3),
+              ),
+              _QuickAction(
+                icon: Icons.account_balance_wallet_outlined,
+                label: 'Contabilidad',
+                onTap: () => widget.onNavigate?.call(4),
               ),
               _QuickAction(
                 icon: Icons.refresh,
@@ -198,16 +202,14 @@ class _DashboardTabState extends State<DashboardTab> {
               ),
               const Spacer(),
               Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
                 decoration: BoxDecoration(
                   color: AppTheme.success.withOpacity(0.15),
                   borderRadius: BorderRadius.circular(6),
                 ),
                 child: Text(
                   'v${_sysInfo['version'] ?? '?'}',
-                  style:
-                      const TextStyle(color: AppTheme.success, fontSize: 12),
+                  style: const TextStyle(color: AppTheme.success, fontSize: 12),
                 ),
               ),
             ],
@@ -282,9 +284,7 @@ class _StatCard extends StatelessWidget {
               const SizedBox(height: 10),
               Text(value,
                   style: TextStyle(
-                      color: color,
-                      fontSize: 28,
-                      fontWeight: FontWeight.bold)),
+                      color: color, fontSize: 28, fontWeight: FontWeight.bold)),
               const SizedBox(height: 2),
               Text(label,
                   style: const TextStyle(
@@ -326,8 +326,8 @@ class _QuickAction extends StatelessWidget {
             Icon(icon, color: AppTheme.primary, size: 18),
             const SizedBox(width: 8),
             Text(label,
-                style: const TextStyle(
-                    color: AppTheme.textPrimary, fontSize: 13)),
+                style:
+                    const TextStyle(color: AppTheme.textPrimary, fontSize: 13)),
           ],
         ),
       ),

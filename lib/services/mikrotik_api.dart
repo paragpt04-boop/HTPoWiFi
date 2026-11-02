@@ -36,7 +36,8 @@ class MikroTikApi {
     // RouterOS usa certificado autofirmado en HTTPS: hay que aceptarlo
     // o la conexion falla siempre con el switch de HTTPS activado.
     final HttpClient io = HttpClient();
-    io.badCertificateCallback = (X509Certificate cert, String host, int port) => true;
+    io.badCertificateCallback =
+        (X509Certificate cert, String host, int port) => true;
     io.connectionTimeout = const Duration(seconds: 12);
 
     _client = IOClient(io);
@@ -137,8 +138,7 @@ class MikroTikApi {
           'Verifica la IP, que estes en la misma red y que el servicio "www" este activo\n'
           'en el router (/ip service enable www).\n($os)');
     } on HandshakeException {
-      throw MikroTikException(
-          'Fallo el handshake HTTPS con ${config.host}.\n'
+      throw MikroTikException('Fallo el handshake HTTPS con ${config.host}.\n'
           'Prueba desactivando HTTPS y usando el puerto 80.');
     } on http.ClientException catch (e) {
       throw MikroTikException('Error de red: ${e.message}');
@@ -209,7 +209,9 @@ class MikroTikApi {
   // ─── Usuarios Hotspot ─────────────────────────────────────
   Future<List<HotspotUser>> getUsers() async {
     final List<Map<String, dynamic>> data = await _getList('/ip/hotspot/user');
-    return data.map((Map<String, dynamic> j) => HotspotUser.fromJson(j)).toList();
+    return data
+        .map((Map<String, dynamic> j) => HotspotUser.fromJson(j))
+        .toList();
   }
 
   Future<Set<String>> getUserNames() async {
@@ -243,7 +245,7 @@ class MikroTikApi {
       await _send('POST', '/ip/hotspot/user/reset-counters',
           body: <String, dynamic>{'.id': id});
     }
-    if (user != null && user.hasExpTag) {
+    if (user != null && (user.hasExpTag || user.hasFirstTag)) {
       await updateUser(id, <String, dynamic>{'comment': user.cleanComment});
     }
   }
@@ -262,6 +264,80 @@ class MikroTikApi {
 
   // ─── Registro de expiración ───────────────────────────────
   static const String expiryScheduler = 'htpowifi-expiry';
+  static const String firstUseScheduler = 'htpowifi-first-use';
+
+  /// Registro independiente del primer uso. Solo añade o quita [ACC:...]
+  /// cuando cambia el contador; no modifica perfiles ni el lector REST.
+  static const String _firstUseScript = r'''
+:local now ([/system clock get date] . " " . [/system clock get time])
+:foreach u in=[/ip hotspot user find] do={
+  :local up [/ip hotspot user get $u uptime]
+  :local c [/ip hotspot user get $u comment]
+  :if ([:typeof $c] != "str") do={ :set c "" }
+  :local p [:find $c "[ACC:"]
+  :if ($up > 0s) do={
+    :if ([:typeof $p] = "nil") do={
+      :if ([:len $c] > 0) do={ :set c ($c . " ") }
+      /ip hotspot user set $u comment=($c . "[ACC:" . $now . "]")
+    }
+  } else={
+    :if ([:typeof $p] != "nil") do={
+      :local e [:find $c "]" $p]
+      :local a [:pick $c 0 $p]
+      :local b ""
+      :if ([:typeof $e] != "nil") do={ :set b [:pick $c ($e + 1) [:len $c]] }
+      :if ([:len $a] > 0) do={
+        :if ([:pick $a ([:len $a] - 1)] = " ") do={ :set a [:pick $a 0 ([:len $a] - 1)] }
+      }
+      /ip hotspot user set $u comment=($a . $b)
+    }
+  }
+}
+''';
+
+  Future<bool> isFirstUseTrackerInstalled() async {
+    final List<Map<String, dynamic>> list = await _getList('/system/scheduler');
+    return list.any((Map<String, dynamic> s) =>
+        s['name'] == firstUseScheduler && s['disabled'] != 'true');
+  }
+
+  /// Los usuarios usados antes de activar el registro no se cobran de nuevo.
+  Future<void> installFirstUseTracker() async {
+    final DateTime? clock = await getRouterClock();
+    if (clock == null || clock.year < 2020) {
+      throw MikroTikException(
+          'El reloj del router no tiene la fecha correcta. Configura NTP antes '
+          'de activar Contabilidad.');
+    }
+    final List<HotspotUser> users = await getUsers();
+    for (final HotspotUser user in users) {
+      if (user.id == null || user.isUnused || user.hasFirstTag) continue;
+      await updateUser(user.id!, <String, dynamic>{
+        'comment': user.commentWithFirstTag('?'),
+      });
+    }
+    final List<Map<String, dynamic>> schedulers =
+        await _getList('/system/scheduler');
+    Map<String, dynamic>? existing;
+    for (final Map<String, dynamic> scheduler in schedulers) {
+      if (scheduler['name'] == firstUseScheduler) existing = scheduler;
+    }
+    final Map<String, dynamic> body = <String, dynamic>{
+      'interval': '1m',
+      'on-event': _firstUseScript,
+      'policy': 'read,write,test',
+      'disabled': 'false',
+      'comment': 'HTPoWiFi - registra el primer uso de tarjetas hotspot',
+    };
+    if (existing != null && existing['.id'] != null) {
+      await _send(
+          'PATCH', '/system/scheduler/${_encodeId(existing['.id'].toString())}',
+          body: body);
+    } else {
+      await _send('PUT', '/system/scheduler',
+          body: <String, dynamic>{'name': firstUseScheduler, ...body});
+    }
+  }
 
   /// Script que corre cada minuto en el router. Cuando un usuario llega a su
   /// limit-uptime escribe "[EXP:fecha hora]" en el comentario; si después se
@@ -314,15 +390,16 @@ class MikroTikApi {
       'on-event': _expiryScript,
       'policy': 'read,write,test',
       'disabled': 'false',
-      'comment': 'HTPoWiFi - registra la hora de expiracion de usuarios hotspot',
+      'comment':
+          'HTPoWiFi - registra la hora de expiracion de usuarios hotspot',
     };
     Map<String, dynamic>? existing;
     for (final Map<String, dynamic> s in list) {
       if (s['name'] == expiryScheduler) existing = s;
     }
     if (existing != null && existing['.id'] != null) {
-      await _send('PATCH',
-          '/system/scheduler/${_encodeId(existing['.id'].toString())}',
+      await _send(
+          'PATCH', '/system/scheduler/${_encodeId(existing['.id'].toString())}',
           body: body);
     } else {
       await _send('PUT', '/system/scheduler',
@@ -340,7 +417,8 @@ class MikroTikApi {
       if (u.id == null || !u.isExpired || u.hasExpTag) continue;
       final DateTime? t = logTimes[u.name];
       final String value = t == null ? '?' : _rosStamp(t);
-      await updateUser(u.id!, <String, dynamic>{'comment': u.commentWithTag(value)});
+      await updateUser(
+          u.id!, <String, dynamic>{'comment': u.commentWithTag(value)});
       count++;
     }
     return count;
